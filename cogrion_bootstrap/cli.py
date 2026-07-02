@@ -137,18 +137,10 @@ def main():
     aws.add_argument("--enable-alb-controller", action="store_true", default=False)
     aws.add_argument("--vpc-id", default="", help="VPC ID (required when --enable-alb-controller)")
     aws.add_argument(
-        "--cluster-autoscaler-role-arn", default="", help="IRSA role ARN for cluster-autoscaler"
-    )
-    aws.add_argument(
-        "--efs-csi-driver-role-arn", default="", help="IRSA role ARN for aws-efs-csi-driver"
-    )
-    aws.add_argument(
-        "--external-secrets-role-arn", default="", help="IRSA role ARN for external-secrets"
-    )
-    aws.add_argument(
-        "--alb-controller-role-arn",
-        default="",
-        help="IRSA role ARN for aws-load-balancer-controller",
+        "--no-create-irsa",
+        action="store_true",
+        default=False,
+        help="Skip IRSA role creation (use when roles are pre-provisioned by Terraform)",
     )
 
     # Addon toggles
@@ -197,6 +189,8 @@ def main():
                 node_role_arn=args.node_role_arn,
             )
 
+        irsa_arns = {} if args.no_create_irsa else provider.ensure_iam()
+
         register_agent(
             control_plane_url=args.control_plane_url,
             token=args.token,
@@ -205,10 +199,7 @@ def main():
         )
 
         addons = provider.addons(
-            cluster_autoscaler_role_arn=args.cluster_autoscaler_role_arn,
-            efs_csi_driver_role_arn=args.efs_csi_driver_role_arn,
-            external_secrets_role_arn=args.external_secrets_role_arn,
-            alb_controller_role_arn=args.alb_controller_role_arn,
+            irsa_arns=irsa_arns,
             vpc_id=args.vpc_id,
         )
 

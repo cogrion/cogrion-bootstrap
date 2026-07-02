@@ -1,6 +1,12 @@
 # AWS Infrastructure Requirements for EKS Clusters
 
-This document describes the AWS networking, IAM, and security group configuration that an existing EKS cluster must have in place for the Cogrion platform bootstrap to succeed. It is derived from the `account-networking/vpc` and `workspace-cluster` Terraform modules.
+This document describes the AWS networking, IAM, and security group configuration that an existing EKS cluster must have in place for the Cogrion platform bootstrap to succeed. It is derived from three Terraform modules:
+
+- `account-networking/vpc` — VPC, subnets, NAT Gateway
+- `workspace-cluster` — EKS cluster, managed node groups, EKS add-ons
+- `workspace-cluster-bootstrap` — IRSA roles, namespaces, storage classes, bootstrap Job
+
+**Sections 1–9** cover infrastructure that must exist before any bootstrap runs. **Sections 10–13** describe what the `workspace-cluster-bootstrap` Terraform module provisions on top of the cluster.
 
 ---
 
@@ -276,3 +282,170 @@ The `cogrion-bootstrap` installer assumes the following are already in place:
 8. `karpenter.sh/discovery` tag on both cluster and node security groups
 9. Subnet tags (`kubernetes.io/role/internal-elb`, `karpenter.sh/discovery`) on EKS data plane subnets
 10. Customer-account automation role with correct trust policy and external ID
+
+---
+
+## 10. Kubernetes Namespaces
+
+The bootstrap module creates three namespaces. They are never deleted by automation — decommissioning requires a manual step.
+
+| Namespace | Purpose |
+|---|---|
+| `cogrion-system` | Platform agent and all system-level resources |
+| `kb-system` | KubeBlocks operator and data-protection workers |
+
+---
+
+## 11. Storage Classes
+
+The bootstrap module reconfigures the default storage class and adds per-AZ classes.
+
+### gp2 (existing)
+
+The default annotation is removed from `gp2` so it no longer competes with `gp3`.
+
+### gp3 (new default)
+
+| Attribute | Value |
+|---|---|
+| Name | `gp3` |
+| Provisioner | `ebs.csi.aws.com` |
+| Volume type | `gp3` |
+| Filesystem | `xfs` |
+| Encryption | `true` |
+| Reclaim policy | `Delete` |
+| Volume expansion | Enabled |
+| Binding mode | `WaitForFirstConsumer` |
+| Default class | Yes |
+
+### gp3-az1 … gp3-azN (per-AZ)
+
+One storage class per AZ (up to `az_count`, default 3), named `gp3-az1`, `gp3-az2`, etc.  
+Same parameters as `gp3` but with an `allowedTopologies` constraint pinning volumes to a single AZ via `topology.ebs.csi.aws.com/zone`. Use these for stateful workloads that need EBS volume locality guarantees.
+
+---
+
+## 12. IRSA Roles
+
+Three IRSA roles are created during bootstrap. All trust the cluster OIDC provider and require the OIDC provider ARN from the cluster Terraform remote state.
+
+### 12a. Bootstrap Role
+
+| Attribute | Value |
+|---|---|
+| Name pattern | `qd-platform-<workspace-id>-bootstrap-role` |
+| Trusted service account | `cogrion-system:bootstrap-sa` |
+| IAM policy | `qd-platform-<workspace-id>-bootstrap-policy` |
+
+**Bootstrap IAM policy** (`bootstrap_policy.json`) — scoped to `arn:aws:s3:::qd-platform-<workspace-id>*`:
+
+| Action | Purpose |
+|---|---|
+| `s3:CreateBucket`, `s3:DeleteBucket`, `s3:ListBucket` | Manage platform S3 buckets |
+| `s3:PutBucketEncryption`, `s3:GetBucketEncryption` | Enforce encryption at rest |
+| `s3:PutBucketPublicAccessBlock`, `s3:GetBucketPublicAccessBlock` | Block public access |
+
+### 12b. Cluster Agent Role
+
+| Attribute | Value |
+|---|---|
+| Name pattern | `qd-platform-<workspace-id>-cluster-agent-role` |
+| Trusted service accounts | `cogrion-system:cluster-agent-python-supervisor`, `cogrion-system:cluster-agent-python-worker` |
+| IAM policy | `qd-platform-<workspace-id>-cluster-agent-policy` |
+
+**Cluster Agent IAM policy** (`cluster_agent_policy.json`) — broad operational permissions needed for Day-2 stack operations:
+
+| Sid | Actions | Resource scope |
+|---|---|---|
+| S3 | Full S3 object + bucket lifecycle management | `quant-data-tfstate-<account-id>*`, `qd-platform-<workspace-id>*` |
+| EKS | Describe, tag, update cluster/nodegroup/addons; create access entries; pod identity; OIDC; SSM parameter reads | `*` |
+| AllowEKSClusterPassRole | `iam:PassRole` | `*` |
+| AllowEC2SpotSLRCreation | `iam:CreateServiceLinkedRole` | EC2 Spot SLR only |
+| ECRAccess | ECR auth token, layer upload/download; `ecr-public:GetAuthorizationToken` | `*` |
+| IAMAccessForTerraform | Create/attach/delete IAM roles, policies, instance profiles | `*` |
+| Karpenter | EventBridge rules, SQS queue lifecycle, `iam:GetInstanceProfile` | `*` |
+| EC2Access | Launch templates, `RunInstances`, describe instances/subnets/SGs/VPCs, tag management | `*` |
+| KMSForOpenBaoUnseal | Full KMS key lifecycle (create, describe, rotate, policy, schedule deletion) | `*` |
+
+### 12c. KubeBlocks Role
+
+| Attribute | Value |
+|---|---|
+| Name pattern | `qd-platform-<workspace-id>-kubeblocks-role` |
+| Trusted service accounts | `kb-system:kubeblocks`, `kb-system:kubeblocks-dataprotection-exec-worker`, `kb-system:kubeblocks-dataprotection-worker` |
+| IAM policy | `qd-platform-<workspace-id>-kubeblocks-policy` |
+
+**KubeBlocks IAM policy** (`kubeblocks_policy.json`):
+
+| Sid | Actions | Resource scope |
+|---|---|---|
+| S3AccessForBackups | `s3:ListBucket`, `s3:GetBucketLocation` | `*` |
+| S3ObjectAccess | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `*` |
+| EBSVolumeManagement | Create/delete/attach/detach/modify volumes, describe volumes, instances, AZs | `*` |
+| EBSCreateTags | `ec2:CreateTags` | `arn:aws:ec2:*:*:volume/*` (only on `CreateVolume`) |
+| EBSDeleteTags | `ec2:DeleteTags` | `arn:aws:ec2:*:*:volume/*` |
+
+---
+
+## 13. Tenant Bootstrap Job
+
+The bootstrap Job is a one-shot Kubernetes Job in `cogrion-system` that calls `POST /agent/register` on the Cogrion control plane and sets up the cluster. It is gated on `tenant_bootstrap.enabled` (default `true`) and is replaced whenever `bootstrap_token` changes.
+
+### Kubernetes RBAC
+
+| Resource | Kind | Permissions |
+|---|---|---|
+| `bootstrap-sa` | ServiceAccount | Annotated with bootstrap IRSA role ARN |
+| `bootstrap-role` | Role (namespaced) | `secrets`: create/get/update/patch; `jobs`: get/list |
+| `bootstrap-cluster-rb` | ClusterRoleBinding | Binds `bootstrap-sa` to `cluster-admin` for CRD/operator installation |
+| `bootstrap-rb` | RoleBinding | Binds `bootstrap-sa` to `bootstrap-role` in `cogrion-system` |
+
+> The `cluster-admin` binding is intentional. The bootstrap Job installs CRDs, operators (KubeBlocks, snapshot-controller), and Helm charts that require cluster-wide permissions. The Job self-destructs after `ttl_seconds_after_finished = 3600`.
+
+### Job spec
+
+| Attribute | Value |
+|---|---|
+| Image | `alpine/k8s:1.29.2` |
+| Restart policy | `OnFailure` |
+| Backoff limit | 2 |
+| TTL after finished | 3600 s (1 hour) |
+| Completion timeout | `bootstrap_job_timeout` (default `6m`) |
+| CPU request / limit | `100m` / `200m` |
+| Memory request / limit | `128Mi` / `256Mi` |
+
+### Environment variables passed to the Job
+
+| Variable | Source |
+|---|---|
+| `BOOTSTRAP_TOKEN` | `bootstrap-token` Secret in `cogrion-system` |
+| `CONTROL_PLANE_URL` | `tenant_bootstrap.control_plane_url` |
+| `CLUSTER_AGENT_ENABLED` | `tenant_bootstrap.cluster_agent_enabled` (default `true`) |
+| `CLUSTER_AGENT_VERSION` | `tenant_bootstrap.cluster_agent_version` (default `0.1.6-0.1.61`) |
+| `CLUSTER_AGENT_DEV_MODE` | `tenant_bootstrap.cluster_agent_dev_mode` (default `false`) |
+| `CLUSTER_AGENT_TS_ENABLED` | `tenant_bootstrap.cluster_agent_ts_enabled` (default `false`) |
+| `CLUSTER_AGENT_TS_VERSION` | `tenant_bootstrap.cluster_agent_ts_version` (default `0.1.4-0.1.6`) |
+| `S3_REGION` | `client_region` |
+| `AWS_ALB_SUBNETS` | Comma-separated list of `public_subnets` IDs |
+| `AWS_ALB_GROUP_NAME` | `<workspace-id>-alb` |
+| `KUBEBLOCK_BACKUP_S3_BUCKET` | `qd-platform-<workspace-id>-kb-backup` |
+| `KUBEBLOCK_BACKUP_S3_REGION` | `client_region` |
+| `TOFU_BACKEND_BUCKET` | `backend_tfstate_bucket` |
+
+### Script selection
+
+The Job runs one of two bootstrap scripts based on `cluster_agent_ts_enabled`:
+
+| Flag | Script | Use case |
+|---|---|---|
+| `false` (default) | `bootstrap.sh` | Standard cluster agent |
+| `true` | `bootstrap_v2.sh` | TypeScript cluster agent variant |
+
+The ConfigMap name includes an 8-character SHA256 checksum of the script file, so any script change triggers automatic Job replacement.
+
+### Pre-requisites specific to the bootstrap Job
+
+- Public subnet IDs must be passed via `public_subnets` — the Job uses them to configure the ALB ingress annotation
+- `backend_tfstate_bucket` must exist and be accessible by the cluster-agent IRSA role
+- The control plane URL (`control_plane_url`) must be reachable from within the cluster
+- A valid one-time `bootstrap_token` must be provided — the Job will fail with 401 if the token is expired or already used

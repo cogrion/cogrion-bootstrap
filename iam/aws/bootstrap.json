@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:PutBucketEncryption",
+        "s3:GetBucketEncryption",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPublicAccessBlock"
+      ],
+      "Resource": [
+        "arn:aws:s3:::{platform_id}*",
+        "arn:aws:s3:::{platform_id}*/*"
+      ]
+    }
+  ]
+}
