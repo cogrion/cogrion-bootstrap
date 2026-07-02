@@ -173,6 +173,8 @@ def main():
         {"nodeSelector.nodegroup": args.node_group_label} if args.node_group_label else {}
     )
 
+    irsa_arns: dict = {}
+
     if args.provider == "aws":
         from .providers.aws import AWSProvider
 
@@ -224,12 +226,23 @@ def main():
 
     _ecr_login(region=getattr(args, "region", "us-east-1"), dry_run=dry)
 
+    cluster_agent_role_arn = irsa_arns.get("cluster-agent", "")
     helm_apply(
         release="cplane-agent",
         namespace=args.namespace,
         chart=CPLANE_AGENT_CHART,
         version=args.agent_version,
-        set_args={"existingSecret": "cluster-agent-credentials", **node_selector_set},
+        set_args={
+            "existingSecret": "cluster-agent-credentials",
+            **(
+                {
+                    "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": cluster_agent_role_arn
+                }
+                if cluster_agent_role_arn
+                else {}
+            ),
+            **node_selector_set,
+        },
         dry_run=dry,
     )
 

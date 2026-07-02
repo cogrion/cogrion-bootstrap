@@ -234,16 +234,21 @@ def test_ensure_iam_creates_all_roles(mocker):
     provider = _make_provider(mocker)
     provider._get_account_id = MagicMock(return_value="123456789012")
     provider._ensure_irsa_role = MagicMock(side_effect=lambda role_name, **kw: f"arn::{role_name}")
+    provider._ensure_service_account = MagicMock()
 
     arns = provider.ensure_iam()
 
     assert set(arns.keys()) == set(_IRSA_ROLES.keys())
     assert provider._ensure_irsa_role.call_count == len(_IRSA_ROLES)
+    assert provider._ensure_service_account.call_count == sum(
+        len(sas) for _, _, sas in _IRSA_ROLES.values()
+    )
 
 
 def test_ensure_iam_passes_correct_service_accounts(mocker):
     provider = _make_provider(mocker)
     provider._get_account_id = MagicMock(return_value="123456789012")
+    provider._ensure_service_account = MagicMock()
     calls_made = {}
 
     def capture(role_name, policy_name, policy_doc, service_accounts):

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 
 import boto3
 
@@ -155,7 +156,10 @@ class AWSProvider(BaseProvider):
         ]
 
     def ensure_iam(self) -> dict[str, str]:
-        """Create all platform IRSA roles and return a map of role-key -> ARN."""
+        """Create all platform IRSA roles and their k8s ServiceAccounts.
+
+        Returns a map of role-key -> IAM role ARN.
+        """
         platform_id = self.cluster_name
         account_id = self._get_account_id()
 
@@ -167,12 +171,16 @@ class AWSProvider(BaseProvider):
             policy_name = f"{platform_id}-{role_key}-policy"
             vars_for_policy = {k: format_vars[k] for k in var_keys}
             policy_doc = _load_policy(policy_file, **vars_for_policy)
-            arns[role_key] = self._ensure_irsa_role(
+            arn = self._ensure_irsa_role(
                 role_name=role_name,
                 policy_name=policy_name,
                 policy_doc=policy_doc,
                 service_accounts=service_accounts,
             )
+            arns[role_key] = arn
+            for ns_sa in service_accounts:
+                namespace, sa_name = ns_sa.split(":", 1)
+                self._ensure_service_account(namespace=namespace, name=sa_name, role_arn=arn)
 
         return arns
 
@@ -273,6 +281,66 @@ class AWSProvider(BaseProvider):
             stateful=stateful,
             disk_size=disk_size,
         )
+
+    def _ensure_service_account(self, namespace: str, name: str, role_arn: str) -> None:
+        """Idempotently create a k8s ServiceAccount annotated with the IRSA role ARN."""
+        check = subprocess.run(
+            ["kubectl", "get", "serviceaccount", name, "-n", namespace],
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            print(f"[aws] ServiceAccount {namespace}/{name} already exists — skipping")
+            return
+
+        print(f"[aws] creating ServiceAccount {namespace}/{name}")
+        if self.dry_run:
+            print(f"[aws] dry-run: skipping ServiceAccount creation")
+            return
+
+        subprocess.run(
+            ["kubectl", "apply", "-f", "-"],
+            input=subprocess.run(
+                ["kubectl", "create", "namespace", namespace, "--dry-run=client", "-o", "yaml"],
+                capture_output=True,
+                check=True,
+            ).stdout,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["kubectl", "apply", "-f", "-"],
+            input=subprocess.run(
+                [
+                    "kubectl",
+                    "create",
+                    "serviceaccount",
+                    name,
+                    "-n",
+                    namespace,
+                    "--dry-run=client",
+                    "-o",
+                    "yaml",
+                ],
+                capture_output=True,
+                check=True,
+            ).stdout,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "kubectl",
+                "annotate",
+                "serviceaccount",
+                name,
+                "-n",
+                namespace,
+                f"eks.amazonaws.com/role-arn={role_arn}",
+                "--overwrite",
+            ],
+            check=True,
+        )
+        print(f"[aws] ServiceAccount {namespace}/{name} created")
 
     def _get_account_id(self) -> str:
         if not self._cached_account_id:
