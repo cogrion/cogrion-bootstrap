@@ -178,7 +178,20 @@ def main():
     if args.provider == "aws":
         from .providers.aws import AWSProvider
 
-        provider = AWSProvider(cluster_name=args.cluster_name, region=args.region, dry_run=dry)
+        result = register_agent(
+            control_plane_url=args.control_plane_url,
+            token=args.token,
+            namespace=args.namespace,
+            dry_run=dry,
+        )
+
+        provider = AWSProvider(
+            ext_account_id=result.ext_account_id,
+            ext_workspace_id=result.ext_workspace_id,
+            cluster_name=args.cluster_name,
+            region=args.region,
+            dry_run=dry,
+        )
 
         if args.create_node_group:
             provider.ensure_cloud_resources(
@@ -192,13 +205,6 @@ def main():
             )
 
         irsa_arns = {} if args.no_create_irsa else provider.ensure_iam()
-
-        register_agent(
-            control_plane_url=args.control_plane_url,
-            token=args.token,
-            namespace=args.namespace,
-            dry_run=dry,
-        )
 
         addons = provider.addons(
             irsa_arns=irsa_arns,
@@ -226,7 +232,6 @@ def main():
 
     _ecr_login(region=getattr(args, "region", "us-east-1"), dry_run=dry)
 
-    cluster_agent_role_arn = irsa_arns.get("cluster-agent", "")
     helm_apply(
         release="cplane-agent",
         namespace=args.namespace,
@@ -234,13 +239,8 @@ def main():
         version=args.agent_version,
         set_args={
             "existingSecret": "cluster-agent-credentials",
-            **(
-                {
-                    "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": cluster_agent_role_arn
-                }
-                if cluster_agent_role_arn
-                else {}
-            ),
+            "serviceAccount.create": "false",
+            "serviceAccount.name": "cplane-agent",
             **node_selector_set,
         },
         dry_run=dry,
@@ -249,5 +249,5 @@ def main():
     print("[cogrion-bootstrap] bootstrap complete")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
