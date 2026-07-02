@@ -24,7 +24,7 @@ Or end-to-end without a live cluster:
 uv run python -m cogrion_bootstrap.cli \
   --provider aws \
   --token test \
-  --cluster-name my-cluster \
+  --cluster-name <my-cluster> \
   --region ap-southeast-1 \
   --dry-run
 ```

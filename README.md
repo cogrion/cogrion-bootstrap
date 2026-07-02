@@ -1,4 +1,4 @@
-# cluster-bootstrap
+# Cogrion Bootstrap
 
 One-command bootstrap for a Cogrion tenant cluster. Registers the cluster with the control plane, installs required Kubernetes addons, and deploys the `cplane-agent`.
 

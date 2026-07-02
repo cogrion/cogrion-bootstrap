@@ -1,9 +1,58 @@
 import json
+import os
 
 import boto3
 
 from ..addons import HelmAddon, METRICS_SERVER, EXTERNAL_SECRETS
 from .base import BaseProvider
+
+_POLICY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "iam", "aws")
+
+# Maps role key -> (policy file, format vars, trusted service accounts)
+_IRSA_ROLES = {
+    "bootstrap": (
+        "bootstrap.json",
+        ["platform_id"],
+        ["cogrion-system:bootstrap-sa"],
+    ),
+    "cluster-agent": (
+        "cluster-agent.json",
+        ["platform_id", "account_id"],
+        [
+            "cogrion-system:cluster-agent-python-supervisor",
+            "cogrion-system:cluster-agent-python-worker",
+        ],
+    ),
+    "kubeblocks": (
+        "kubeblocks.json",
+        [],
+        [
+            "kb-system:kubeblocks",
+            "kb-system:kubeblocks-dataprotection-exec-worker",
+            "kb-system:kubeblocks-dataprotection-worker",
+        ],
+    ),
+    "cluster-autoscaler": (
+        "cluster-autoscaler.json",
+        [],
+        ["kube-system:cluster-autoscaler-aws-cluster-autoscaler"],
+    ),
+    "efs-csi-driver": (
+        "efs-csi-driver.json",
+        [],
+        ["kube-system:efs-csi-controller-sa"],
+    ),
+    "alb-controller": (
+        "alb-controller.json",
+        [],
+        ["kube-system:aws-load-balancer-controller"],
+    ),
+    "external-secrets": (
+        "external-secrets.json",
+        [],
+        ["external-secrets:external-secrets"],
+    ),
+}
 
 
 class AWSProvider(BaseProvider):
@@ -13,39 +62,14 @@ class AWSProvider(BaseProvider):
         self.eks = boto3.client("eks", region_name=region)
         self.ec2 = boto3.client("ec2", region_name=region)
         self.iam = boto3.client("iam")
+        self.sts = boto3.client("sts")
+        self._cached_oidc_arn: str = ""
+        self._cached_oidc_url: str = ""
+        self._cached_account_id: str = ""
 
-    def addons(
-        self,
-        cluster_autoscaler_role_arn: str = "",
-        efs_csi_driver_role_arn: str = "",
-        external_secrets_role_arn: str = "",
-        alb_controller_role_arn: str = "",
-        vpc_id: str = "",
-    ) -> list:
-        if not cluster_autoscaler_role_arn:
-            cluster_autoscaler_role_arn = self._ensure_irsa_role(
-                role_name=f"{self.cluster_name}-cluster-autoscaler",
-                namespace="kube-system",
-                service_account="cluster-autoscaler-aws-cluster-autoscaler",
-                policy_statements=[
-                    {
-                        "Effect": "Allow",
-                        "Action": [
-                            "autoscaling:DescribeAutoScalingGroups",
-                            "autoscaling:DescribeAutoScalingInstances",
-                            "autoscaling:DescribeLaunchConfigurations",
-                            "autoscaling:DescribeScalingActivities",
-                            "autoscaling:DescribeTags",
-                            "autoscaling:SetDesiredCapacity",
-                            "autoscaling:TerminateInstanceInAutoScalingGroup",
-                            "ec2:DescribeLaunchTemplateVersions",
-                            "ec2:DescribeInstanceTypes",
-                            "eks:DescribeNodegroup",
-                        ],
-                        "Resource": "*",
-                    }
-                ],
-            )
+    def addons(self, irsa_arns: dict[str, str], vpc_id: str = "") -> list:
+        def _arn(key: str) -> str:
+            return irsa_arns.get(key, "")
 
         cluster_autoscaler = HelmAddon(
             release_name="cluster-autoscaler",
@@ -58,11 +82,10 @@ class AWSProvider(BaseProvider):
                 "autoDiscovery.clusterName": self.cluster_name,
                 "awsRegion": self.region,
                 **(
-                    {
-                        "rbac.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": cluster_autoscaler_role_arn
-                    }
-                    if cluster_autoscaler_role_arn
-                    else {}
+                    _irsa_set(
+                        "rbac.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn",
+                        _arn("cluster-autoscaler"),
+                    )
                 ),
             },
             detect=("deployment", "cluster-autoscaler"),
@@ -76,11 +99,10 @@ class AWSProvider(BaseProvider):
             repo_url="https://kubernetes-sigs.github.io/aws-efs-csi-driver",
             set_args={
                 **(
-                    {
-                        "controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": efs_csi_driver_role_arn
-                    }
-                    if efs_csi_driver_role_arn
-                    else {}
+                    _irsa_set(
+                        "controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn",
+                        _arn("efs-csi-driver"),
+                    )
                 ),
             },
             detect=("deployment", "efs-csi-controller"),
@@ -98,11 +120,10 @@ class AWSProvider(BaseProvider):
                 "podDisruptionBudget.maxUnavailable": "1",
                 "enableServiceMutatorWebhook": "false",
                 **(
-                    {
-                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": alb_controller_role_arn
-                    }
-                    if alb_controller_role_arn
-                    else {}
+                    _irsa_set(
+                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn",
+                        _arn("alb-controller"),
+                    )
                 ),
             },
             detect=("deployment", "aws-load-balancer-controller"),
@@ -117,11 +138,10 @@ class AWSProvider(BaseProvider):
             detect=EXTERNAL_SECRETS.detect,
             set_args={
                 **(
-                    {
-                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": external_secrets_role_arn
-                    }
-                    if external_secrets_role_arn
-                    else {}
+                    _irsa_set(
+                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn",
+                        _arn("external-secrets"),
+                    )
                 ),
             },
         )
@@ -134,15 +154,40 @@ class AWSProvider(BaseProvider):
             external_secrets,
         ]
 
+    def ensure_iam(self) -> dict[str, str]:
+        """Create all platform IRSA roles and return a map of role-key -> ARN."""
+        platform_id = self.cluster_name
+        account_id = self._get_account_id()
+
+        format_vars = {"platform_id": platform_id, "account_id": account_id}
+
+        arns: dict[str, str] = {}
+        for role_key, (policy_file, var_keys, service_accounts) in _IRSA_ROLES.items():
+            role_name = f"{platform_id}-{role_key}-role"
+            policy_name = f"{platform_id}-{role_key}-policy"
+            vars_for_policy = {k: format_vars[k] for k in var_keys}
+            policy_doc = _load_policy(policy_file, **vars_for_policy)
+            arns[role_key] = self._ensure_irsa_role(
+                role_name=role_name,
+                policy_name=policy_name,
+                policy_doc=policy_doc,
+                service_accounts=service_accounts,
+            )
+
+        return arns
+
     def ensure_cloud_resources(
         self,
         name: str = "system",
-        instance_type: str = "t3.medium",
-        desired: int = 2,
+        instance_type: str = "m5.xlarge",
+        desired: int = 1,
         min_size: int = 1,
-        max_size: int = 4,
+        max_size: int = 3,
         subnets: str = "",
         node_role_arn: str = "",
+        stateful: bool = False,
+        disk_size: int = 100,
+        disk_type: str = "gp3",
     ) -> None:
         status = self._node_group_status(name)
         print(f"[aws] node group '{name}' status: {status or 'not found'}")
@@ -159,7 +204,14 @@ class AWSProvider(BaseProvider):
                     clusterName=self.cluster_name, nodegroupName=name
                 )
 
-        subnet_list = subnets.split(",") if subnets else self._discover_subnets()
+        subnet_list = subnets.split(",") if subnets else self._discover_eks_subnets()
+
+        # Stateful node groups are pinned to a single AZ to prevent EBS volume
+        # node affinity conflicts when pods are rescheduled across AZs.
+        if stateful and len(subnet_list) > 1:
+            subnet_list = [subnet_list[0]]
+            print(f"[aws] stateful=True — pinning node group to single AZ subnet: {subnet_list[0]}")
+
         role_arn = node_role_arn or self._ensure_node_role(f"{self.cluster_name}-node-role")
 
         print(
@@ -170,6 +222,12 @@ class AWSProvider(BaseProvider):
             print(f"[aws] dry-run: skipping node group creation")
             return
 
+        lt_id, lt_version = self._ensure_launch_template(
+            name=f"{self.cluster_name}-{name}",
+            disk_size=disk_size,
+            disk_type=disk_type,
+        )
+
         self.eks.create_nodegroup(
             clusterName=self.cluster_name,
             nodegroupName=name,
@@ -177,7 +235,13 @@ class AWSProvider(BaseProvider):
             subnets=subnet_list,
             instanceTypes=[instance_type],
             scalingConfig={"minSize": min_size, "maxSize": max_size, "desiredSize": desired},
-            labels={"nodegroup": name},
+            labels={"WorkerType": "ON_DEMAND", "nodegroup": name},
+            tags={
+                "karpenter.sh/discovery": self.cluster_name,
+                "k8s.io/cluster-autoscaler/enabled": "true",
+                f"k8s.io/cluster-autoscaler/{self.cluster_name}": "owned",
+            },
+            launchTemplate={"id": lt_id, "version": lt_version},
         )
 
         print(f"[aws] waiting for node group '{name}' to become active...")
@@ -187,7 +251,16 @@ class AWSProvider(BaseProvider):
         print(f"[aws] node group '{name}' is active")
 
     def ensure_node_group(
-        self, name, instance_type, desired, min_size, max_size, subnets, node_role_arn
+        self,
+        name,
+        instance_type,
+        desired,
+        min_size,
+        max_size,
+        subnets,
+        node_role_arn,
+        stateful: bool = False,
+        disk_size: int = 100,
     ):
         self.ensure_cloud_resources(
             name=name,
@@ -197,10 +270,102 @@ class AWSProvider(BaseProvider):
             max_size=max_size,
             subnets=subnets,
             node_role_arn=node_role_arn,
+            stateful=stateful,
+            disk_size=disk_size,
         )
 
-    def ensure_iam(self, role_name: str = "") -> None:
-        self._ensure_node_role(role_name or f"{self.cluster_name}-node-role")
+    def _get_account_id(self) -> str:
+        if not self._cached_account_id:
+            self._cached_account_id = self.sts.get_caller_identity()["Account"]
+        return self._cached_account_id
+
+    def _get_oidc(self) -> tuple[str, str]:
+        """Return (oidc_provider_arn, oidc_url_without_scheme) for the cluster."""
+        if self._cached_oidc_arn:
+            return self._cached_oidc_arn, self._cached_oidc_url
+
+        cluster = self.eks.describe_cluster(name=self.cluster_name)
+        issuer = cluster["cluster"]["identity"]["oidc"]["issuer"]
+        oidc_url = issuer.replace("https://", "")
+
+        account_id = self._get_account_id()
+        region = self.region
+        oidc_id = oidc_url.split("/")[-1]
+        arn = (
+            f"arn:aws:iam::{account_id}:oidc-provider/oidc.eks.{region}.amazonaws.com/id/{oidc_id}"
+        )
+
+        self._cached_oidc_arn = arn
+        self._cached_oidc_url = oidc_url
+        return arn, oidc_url
+
+    def _ensure_irsa_role(
+        self,
+        role_name: str,
+        policy_name: str,
+        policy_doc: str,
+        service_accounts: list[str],
+    ) -> str:
+        """Idempotently create an IRSA role and return its ARN."""
+        try:
+            arn = self.iam.get_role(RoleName=role_name)["Role"]["Arn"]
+            print(f"[aws] IRSA role '{role_name}' already exists")
+            return arn
+        except self.iam.exceptions.NoSuchEntityException:
+            pass
+
+        print(f"[aws] creating IRSA role '{role_name}'")
+        if self.dry_run:
+            print(f"[aws] dry-run: skipping IRSA role creation")
+            return f"arn:aws:iam::000000000000:role/{role_name}"
+
+        policy_arn = self._ensure_policy(policy_name, policy_doc)
+        oidc_arn, oidc_url = self._get_oidc()
+
+        subjects = [f"system:serviceaccount:{sa}" for sa in service_accounts]
+
+        trust = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Federated": oidc_arn},
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            f"{oidc_url}:sub": subjects,
+                            f"{oidc_url}:aud": "sts.amazonaws.com",
+                        }
+                    },
+                }
+            ],
+        }
+
+        arn = self.iam.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(trust),
+        )[
+            "Role"
+        ]["Arn"]
+
+        self.iam.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+        print(f"[aws] IRSA role created: {arn}")
+        return arn
+
+    def _ensure_policy(self, policy_name: str, policy_doc: str) -> str:
+        """Idempotently create a customer-managed policy and return its ARN."""
+        account_id = self._get_account_id()
+        policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
+        try:
+            self.iam.get_policy(PolicyArn=policy_arn)
+            print(f"[aws] IAM policy '{policy_name}' already exists")
+            return policy_arn
+        except self.iam.exceptions.NoSuchEntityException:
+            pass
+
+        print(f"[aws] creating IAM policy '{policy_name}'")
+        self.iam.create_policy(PolicyName=policy_name, PolicyDocument=policy_doc)
+        return policy_arn
 
     def _node_group_status(self, name: str) -> str:
         try:
@@ -209,129 +374,100 @@ class AWSProvider(BaseProvider):
         except self.eks.exceptions.ResourceNotFoundException:
             return ""
 
-    def _discover_subnets(self) -> list[str]:
+    def _discover_eks_subnets(self) -> list[str]:
+        """Return EKS data-plane subnets (RFC6598 100.64.0.0/10) sorted by AZ.
+
+        The platform carves worker nodes and pods out of the secondary 100.64.0.0/16
+        CIDR attached to the VPC, not the routable RFC1918 private subnets or public
+        subnets. Sorting by AZ name keeps subnet[0] stable so stateful node groups
+        always land in az1 alongside their gp3-az1 EBS volumes.
+        """
         cluster = self.eks.describe_cluster(name=self.cluster_name)
-        all_subnets = cluster["cluster"]["resourcesVpcConfig"]["subnetIds"]
+        all_subnet_ids = cluster["cluster"]["resourcesVpcConfig"]["subnetIds"]
 
-        resp = self.ec2.describe_subnets(SubnetIds=all_subnets)
-        public = [s["SubnetId"] for s in resp["Subnets"] if s.get("MapPublicIpOnLaunch")]
-        if public:
-            print(f"[aws] discovered public subnets: {public}")
-            return public
+        resp = self.ec2.describe_subnets(SubnetIds=all_subnet_ids)
+        eks_subnets = [s for s in resp["Subnets"] if s["CidrBlock"].startswith("100.")]
 
+        if eks_subnets:
+            sorted_subnets = [
+                s["SubnetId"] for s in sorted(eks_subnets, key=lambda s: s["AvailabilityZone"])
+            ]
+            print(f"[aws] discovered EKS data-plane subnets (100.x): {sorted_subnets}")
+            return sorted_subnets
+
+        # Fallback for clusters not using the RFC6598 secondary CIDR pattern:
+        # prefer private subnets that have a NAT gateway route over public subnets.
         nat_subnets = []
-        for subnet in all_subnets:
+        for subnet in resp["Subnets"]:
+            sid = subnet["SubnetId"]
             rtbs = self.ec2.describe_route_tables(
-                Filters=[{"Name": "association.subnet-id", "Values": [subnet]}]
+                Filters=[{"Name": "association.subnet-id", "Values": [sid]}]
             )["RouteTables"]
             if not rtbs:
-                vpc_id = resp["Subnets"][0]["VpcId"]
                 rtbs = self.ec2.describe_route_tables(
                     Filters=[
-                        {"Name": "vpc-id", "Values": [vpc_id]},
+                        {"Name": "vpc-id", "Values": [subnet["VpcId"]]},
                         {"Name": "association.main", "Values": ["true"]},
                     ]
                 )["RouteTables"]
             for rtb in rtbs:
                 if any(r.get("NatGatewayId") for r in rtb.get("Routes", [])):
-                    nat_subnets.append(subnet)
+                    nat_subnets.append(sid)
                     break
 
         if nat_subnets:
-            print(f"[aws] discovered private subnets with NAT: {nat_subnets}")
+            print(f"[aws] discovered private subnets with NAT (fallback): {nat_subnets}")
             return nat_subnets
 
         raise RuntimeError(
-            "Could not discover usable subnets — no public subnets and no private subnets with a NAT gateway route. "
+            "Could not discover EKS data-plane subnets — no 100.x secondary-CIDR subnets "
+            "and no private subnets with a NAT gateway route. "
             "Pass --node-group-subnets explicitly."
         )
 
-    def _ensure_oidc_provider(self) -> str:
-        cluster = self.eks.describe_cluster(name=self.cluster_name)["cluster"]
-        issuer_url = cluster["identity"]["oidc"]["issuer"]
-        issuer_host = issuer_url.replace("https://", "")
-        account_id = boto3.client("sts").get_caller_identity()["Account"]
-        provider_arn = f"arn:aws:iam::{account_id}:oidc-provider/{issuer_host}"
+    def _ensure_launch_template(self, name: str, disk_size: int, disk_type: str) -> tuple[str, str]:
+        resp = self.ec2.describe_launch_templates(
+            Filters=[{"Name": "launch-template-name", "Values": [name]}]
+        )
+        if resp["LaunchTemplates"]:
+            lt = resp["LaunchTemplates"][0]
+            lt_id = lt["LaunchTemplateId"]
+            lt_version = str(lt["DefaultVersionNumber"])
+            print(f"[aws] launch template '{name}' already exists ({lt_id} v{lt_version})")
+            return lt_id, lt_version
 
-        try:
-            self.iam.get_open_id_connect_provider(OpenIDConnectProviderArn=provider_arn)
-            return provider_arn
-        except self.iam.exceptions.NoSuchEntityException:
-            pass
-
-        print(f"[aws] no OIDC provider found for cluster — associating '{issuer_host}'")
+        print(f"[aws] creating launch template '{name}'")
         if self.dry_run:
-            print(f"[aws] dry-run: skipping OIDC provider creation")
-            return provider_arn
+            print(f"[aws] dry-run: skipping launch template creation")
+            return "lt-00000000000000000", "1"
 
-        import ssl
-        import urllib.request
-
-        cert = ssl.get_server_certificate((issuer_host.split("/")[0], 443))
-        thumbprint = (
-            __import__("hashlib")
-            .sha1(ssl.PEM_cert_to_DER_cert(cert))
-            .hexdigest()
+        resp = self.ec2.create_launch_template(
+            LaunchTemplateName=name,
+            LaunchTemplateData={
+                # IMDSv2 required; hop limit 2 allows pods to reach instance metadata.
+                "MetadataOptions": {
+                    "HttpEndpoint": "enabled",
+                    "HttpTokens": "required",
+                    "HttpPutResponseHopLimit": 2,
+                },
+                "BlockDeviceMappings": [
+                    {
+                        "DeviceName": "/dev/xvda",
+                        "Ebs": {
+                            "VolumeSize": disk_size,
+                            "VolumeType": disk_type,
+                            "Encrypted": True,
+                            "DeleteOnTermination": True,
+                        },
+                    }
+                ],
+            },
         )
-        self.iam.create_open_id_connect_provider(
-            Url=issuer_url,
-            ClientIDList=["sts.amazonaws.com"],
-            ThumbprintList=[thumbprint],
-        )
-        return provider_arn
-
-    def _ensure_irsa_role(
-        self,
-        role_name: str,
-        namespace: str,
-        service_account: str,
-        policy_statements: list,
-    ) -> str:
-        try:
-            existing = self.iam.get_role(RoleName=role_name)["Role"]["Arn"]
-            return existing
-        except self.iam.exceptions.NoSuchEntityException:
-            pass
-
-        if self.dry_run:
-            print(f"[aws] dry-run: skipping IRSA role creation for '{role_name}'")
-            return f"arn:aws:iam::000000000000:role/{role_name}"
-
-        oidc_provider_arn = self._ensure_oidc_provider()
-        issuer_host = oidc_provider_arn.split("/", 1)[1]
-
-        print(f"[aws] creating IRSA role '{role_name}' for {namespace}/{service_account}")
-        assume_role_policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Principal": {"Federated": oidc_provider_arn},
-                    "Action": "sts:AssumeRoleWithWebIdentity",
-                    "Condition": {
-                        "StringEquals": {
-                            f"{issuer_host}:sub": f"system:serviceaccount:{namespace}:{service_account}",
-                            f"{issuer_host}:aud": "sts.amazonaws.com",
-                        }
-                    },
-                }
-            ],
-        }
-
-        role_arn = self.iam.create_role(
-            RoleName=role_name,
-            AssumeRolePolicyDocument=json.dumps(assume_role_policy),
-        )["Role"]["Arn"]
-
-        self.iam.put_role_policy(
-            RoleName=role_name,
-            PolicyName=f"{role_name}-policy",
-            PolicyDocument=json.dumps(
-                {"Version": "2012-10-17", "Statement": policy_statements}
-            ),
-        )
-
-        return role_arn
+        lt = resp["LaunchTemplate"]
+        lt_id = lt["LaunchTemplateId"]
+        lt_version = str(lt["DefaultVersionNumber"])
+        print(f"[aws] launch template created: {lt_id} v{lt_version}")
+        return lt_id, lt_version
 
     def _ensure_node_role(self, role_name: str) -> str:
         try:
@@ -368,3 +504,16 @@ class AWSProvider(BaseProvider):
             self.iam.attach_role_policy(RoleName=role_name, PolicyArn=policy)
 
         return arn
+
+
+def _load_policy(filename: str, **vars) -> str:
+    path = os.path.normpath(os.path.join(_POLICY_DIR, filename))
+    with open(path) as f:
+        content = f.read()
+    for key, value in vars.items():
+        content = content.replace("{" + key + "}", value)
+    return content
+
+
+def _irsa_set(key: str, arn: str) -> dict:
+    return {key: arn} if arn else {}
