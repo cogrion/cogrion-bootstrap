@@ -7,14 +7,11 @@ class BaseProvider(ABC):
         self.dry_run = dry_run
 
     @abstractmethod
-    def ensure_node_group(
-        self,
-        name: str,
-        instance_type: str,
-        desired: int,
-        min_size: int,
-        max_size: int,
-        subnets: str,
-        node_role_arn: str,
-    ) -> None:
-        pass
+    def addons(self) -> list:
+        """Return the ordered list of HelmAddon/KubectlAddon for this provider."""
+
+    def ensure_cloud_resources(self, **kwargs) -> None:
+        """Provision cloud-level resources (node groups, VPCs, etc). Override per provider."""
+
+    def ensure_iam(self, **kwargs) -> None:
+        """Provision IAM roles and policies. Override per provider."""

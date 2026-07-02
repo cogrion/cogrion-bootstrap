@@ -1,5 +1,8 @@
+import json
+
 import boto3
 
+from ..addons import HelmAddon, METRICS_SERVER, EXTERNAL_SECRETS
 from .base import BaseProvider
 
 
@@ -11,15 +14,110 @@ class AWSProvider(BaseProvider):
         self.ec2 = boto3.client("ec2", region_name=region)
         self.iam = boto3.client("iam")
 
-    def ensure_node_group(
+    def addons(
         self,
-        name: str,
-        instance_type: str,
-        desired: int,
-        min_size: int,
-        max_size: int,
-        subnets: str,
-        node_role_arn: str,
+        cluster_autoscaler_role_arn: str = "",
+        efs_csi_driver_role_arn: str = "",
+        external_secrets_role_arn: str = "",
+        alb_controller_role_arn: str = "",
+        vpc_id: str = "",
+    ) -> list:
+        cluster_autoscaler = HelmAddon(
+            release_name="cluster-autoscaler",
+            namespace="kube-system",
+            chart="autoscaler/cluster-autoscaler",
+            repo_name="autoscaler",
+            repo_url="https://kubernetes.github.io/autoscaler",
+            version="9.57.0",
+            set_args={
+                "autoDiscovery.clusterName": self.cluster_name,
+                "awsRegion": self.region,
+                **(
+                    {
+                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": cluster_autoscaler_role_arn
+                    }
+                    if cluster_autoscaler_role_arn
+                    else {}
+                ),
+            },
+            detect=("deployment", "cluster-autoscaler"),
+        )
+
+        efs_csi_driver = HelmAddon(
+            release_name="aws-efs-csi-driver",
+            namespace="kube-system",
+            chart="efs-csi-driver/aws-efs-csi-driver",
+            repo_name="efs-csi-driver",
+            repo_url="https://kubernetes-sigs.github.io/aws-efs-csi-driver",
+            set_args={
+                **(
+                    {
+                        "controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": efs_csi_driver_role_arn
+                    }
+                    if efs_csi_driver_role_arn
+                    else {}
+                ),
+            },
+            detect=("deployment", "efs-csi-controller"),
+        )
+
+        alb_controller = HelmAddon(
+            release_name="aws-load-balancer-controller",
+            namespace="kube-system",
+            chart="eks/aws-load-balancer-controller",
+            repo_name="eks",
+            repo_url="https://aws.github.io/eks-charts",
+            set_args={
+                "clusterName": self.cluster_name,
+                "vpcId": vpc_id,
+                "podDisruptionBudget.maxUnavailable": "1",
+                "enableServiceMutatorWebhook": "false",
+                **(
+                    {
+                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": alb_controller_role_arn
+                    }
+                    if alb_controller_role_arn
+                    else {}
+                ),
+            },
+            detect=("deployment", "aws-load-balancer-controller"),
+        )
+
+        external_secrets = HelmAddon(
+            release_name=EXTERNAL_SECRETS.release_name,
+            namespace=EXTERNAL_SECRETS.namespace,
+            chart=EXTERNAL_SECRETS.chart,
+            repo_name=EXTERNAL_SECRETS.repo_name,
+            repo_url=EXTERNAL_SECRETS.repo_url,
+            detect=EXTERNAL_SECRETS.detect,
+            set_args={
+                **(
+                    {
+                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": external_secrets_role_arn
+                    }
+                    if external_secrets_role_arn
+                    else {}
+                ),
+            },
+        )
+
+        return [
+            # cluster_autoscaler,
+            efs_csi_driver,
+            METRICS_SERVER,
+            alb_controller,
+            external_secrets,
+        ]
+
+    def ensure_cloud_resources(
+        self,
+        name: str = "system",
+        instance_type: str = "t3.medium",
+        desired: int = 2,
+        min_size: int = 1,
+        max_size: int = 4,
+        subnets: str = "",
+        node_role_arn: str = "",
     ) -> None:
         status = self._node_group_status(name)
         print(f"[aws] node group '{name}' status: {status or 'not found'}")
@@ -32,8 +130,9 @@ class AWSProvider(BaseProvider):
             print(f"[aws] node group '{name}' in CREATE_FAILED — deleting before retry")
             if not self.dry_run:
                 self.eks.delete_nodegroup(clusterName=self.cluster_name, nodegroupName=name)
-                waiter = self.eks.get_waiter("nodegroup_deleted")
-                waiter.wait(clusterName=self.cluster_name, nodegroupName=name)
+                self.eks.get_waiter("nodegroup_deleted").wait(
+                    clusterName=self.cluster_name, nodegroupName=name
+                )
 
         subnet_list = subnets.split(",") if subnets else self._discover_subnets()
         role_arn = node_role_arn or self._ensure_node_role(f"{self.cluster_name}-node-role")
@@ -57,9 +156,26 @@ class AWSProvider(BaseProvider):
         )
 
         print(f"[aws] waiting for node group '{name}' to become active...")
-        waiter = self.eks.get_waiter("nodegroup_active")
-        waiter.wait(clusterName=self.cluster_name, nodegroupName=name)
+        self.eks.get_waiter("nodegroup_active").wait(
+            clusterName=self.cluster_name, nodegroupName=name
+        )
         print(f"[aws] node group '{name}' is active")
+
+    def ensure_node_group(
+        self, name, instance_type, desired, min_size, max_size, subnets, node_role_arn
+    ):
+        self.ensure_cloud_resources(
+            name=name,
+            instance_type=instance_type,
+            desired=desired,
+            min_size=min_size,
+            max_size=max_size,
+            subnets=subnets,
+            node_role_arn=node_role_arn,
+        )
+
+    def ensure_iam(self, role_name: str = "") -> None:
+        self._ensure_node_role(role_name or f"{self.cluster_name}-node-role")
 
     def _node_group_status(self, name: str) -> str:
         try:
@@ -78,7 +194,6 @@ class AWSProvider(BaseProvider):
             print(f"[aws] discovered public subnets: {public}")
             return public
 
-        # Fall back to subnets with a NAT gateway route
         nat_subnets = []
         for subnet in all_subnets:
             rtbs = self.ec2.describe_route_tables(
@@ -116,8 +231,6 @@ class AWSProvider(BaseProvider):
         if self.dry_run:
             print(f"[aws] dry-run: skipping role creation")
             return f"arn:aws:iam::000000000000:role/{role_name}"
-
-        import json
 
         arn = self.iam.create_role(
             RoleName=role_name,

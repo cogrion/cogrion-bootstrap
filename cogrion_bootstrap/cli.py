@@ -1,9 +1,73 @@
 import argparse
+import subprocess
 import sys
 
+from .constants import (
+    CPLANE_AGENT_CHART,
+    CPLANE_AGENT_DEFAULT_VERSION,
+    CPLANE_API_URL,
+    ECR_PUBLIC_REGISTRY,
+)
 from .register import register_agent
-from .helm import helm_apply
-from .addons import ADDONS
+from .helm import helm_apply, ensure_helm_repos, is_externally_managed
+from .addons import HelmAddon, KubectlAddon, helm_repos_for
+
+
+def _ecr_login(region: str, dry_run: bool = False) -> None:
+    registry = ECR_PUBLIC_REGISTRY
+    print(f"[ecr] logging in to {registry}")
+    if dry_run:
+        print(f"[ecr] dry-run: skipping login")
+        return
+    token = subprocess.run(
+        ["aws", "ecr-public", "get-login-password", "--region", "us-east-1"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    result = subprocess.run(
+        ["helm", "registry", "login", registry, "--username", "AWS", "--password-stdin"],
+        input=token,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"[ecr] helm registry login failed:\n{result.stderr.strip()}")
+    print(f"[ecr] login successful")
+
+
+def _kubectl_apply(manifest_url: str, dry_run: bool = False) -> None:
+    cmd = ["kubectl", "apply", "-f", manifest_url]
+    if dry_run:
+        print(f"[kubectl] dry-run: {' '.join(cmd)}")
+        return
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"[kubectl] apply failed:\n{result.stderr.strip()}")
+    print(result.stdout.strip())
+
+
+def _install_addons(addons: list, node_selector_set: dict, dry_run: bool) -> None:
+    ensure_helm_repos(helm_repos_for(addons), dry_run=dry_run)
+    for addon in addons:
+        if addon.detect and not dry_run:
+            kind, name = addon.detect
+            if is_externally_managed(kind, name, addon.namespace):
+                print(
+                    f"[cogrion-bootstrap] {addon.release_name} already installed outside Helm — skipping"
+                )
+                continue
+        if isinstance(addon, HelmAddon):
+            helm_apply(
+                release=addon.release_name,
+                namespace=addon.namespace,
+                chart=addon.chart,
+                version=addon.version,
+                set_args={**addon.set_args, **node_selector_set},
+                dry_run=dry_run,
+            )
+        elif isinstance(addon, KubectlAddon):
+            _kubectl_apply(addon.manifest_url, dry_run=dry_run)
 
 
 def main():
@@ -22,7 +86,7 @@ def main():
     )
     parser.add_argument(
         "--control-plane-url",
-        default="https://cplane.api.cogrion.com",
+        default=CPLANE_API_URL,
         help="Override the control plane API URL (default: https://cplane.api.cogrion.com)",
     )
     parser.add_argument(
@@ -32,7 +96,7 @@ def main():
     )
     parser.add_argument(
         "--agent-version",
-        default="0.1.5-0.1.11",
+        default=CPLANE_AGENT_DEFAULT_VERSION,
         help="cplane-agent Helm chart version (composite tag)",
     )
     parser.add_argument(
@@ -87,20 +151,13 @@ def main():
         help="IRSA role ARN for aws-load-balancer-controller",
     )
 
-    # Addon toggles (provider-agnostic names where possible)
-    addons = parser.add_argument_group("Addons")
-    addons.add_argument("--enable-cluster-autoscaler", action="store_true", default=True)
-    addons.add_argument(
-        "--no-cluster-autoscaler", dest="enable_cluster_autoscaler", action="store_false"
-    )
-    addons.add_argument("--enable-efs-csi-driver", action="store_true", default=True)
-    addons.add_argument("--no-efs-csi-driver", dest="enable_efs_csi_driver", action="store_false")
-    addons.add_argument("--enable-external-secrets", action="store_true", default=True)
-    addons.add_argument(
-        "--no-external-secrets", dest="enable_external_secrets", action="store_false"
-    )
-    addons.add_argument("--enable-metrics-server", action="store_true", default=True)
-    addons.add_argument("--no-metrics-server", dest="enable_metrics_server", action="store_false")
+    # Addon toggles
+    addon_group = parser.add_argument_group("Addons")
+    addon_group.add_argument("--no-cluster-autoscaler", action="store_true", default=False)
+    addon_group.add_argument("--no-efs-csi-driver", action="store_true", default=False)
+    addon_group.add_argument("--no-metrics-server", action="store_true", default=False)
+    addon_group.add_argument("--no-alb-controller", action="store_true", default=False)
+    addon_group.add_argument("--no-external-secrets", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -120,12 +177,17 @@ def main():
         f"[cogrion-bootstrap] provider={args.provider} cluster={getattr(args, 'cluster_name', '')} dry_run={dry}"
     )
 
+    node_selector_set = (
+        {"nodeSelector.nodegroup": args.node_group_label} if args.node_group_label else {}
+    )
+
     if args.provider == "aws":
         from .providers.aws import AWSProvider
 
         provider = AWSProvider(cluster_name=args.cluster_name, region=args.region, dry_run=dry)
+
         if args.create_node_group:
-            provider.ensure_node_group(
+            provider.ensure_cloud_resources(
                 name=args.node_group_name,
                 instance_type=args.node_group_instance_type,
                 desired=args.node_group_desired,
@@ -135,54 +197,46 @@ def main():
                 node_role_arn=args.node_role_arn,
             )
 
-    register_agent(
-        control_plane_url=args.control_plane_url,
-        token=args.token,
-        namespace=args.namespace,
-        dry_run=dry,
-    )
-
-    addon_flags = {
-        "cluster-autoscaler": args.enable_cluster_autoscaler,
-        "aws-efs-csi-driver": args.enable_efs_csi_driver,
-        "external-secrets": args.enable_external_secrets,
-        "metrics-server": args.enable_metrics_server,
-        "aws-load-balancer-controller": getattr(args, "enable_alb_controller", False),
-    }
-    irsa_arns = {
-        "cluster-autoscaler": getattr(args, "cluster_autoscaler_role_arn", ""),
-        "aws-efs-csi-driver": getattr(args, "efs_csi_driver_role_arn", ""),
-        "external-secrets": getattr(args, "external_secrets_role_arn", ""),
-        "aws-load-balancer-controller": getattr(args, "alb_controller_role_arn", ""),
-    }
-
-    node_selector_set = (
-        {"nodeSelector.nodegroup": args.node_group_label} if args.node_group_label else {}
-    )
-
-    for addon in ADDONS:
-        if not addon_flags.get(addon.release_name, False):
-            print(f"[cogrion-bootstrap] skipping {addon.release_name}")
-            continue
-        extra = addon.extra_set_args(
-            cluster_name=getattr(args, "cluster_name", ""),
-            region=getattr(args, "region", ""),
-            vpc_id=getattr(args, "vpc_id", ""),
-            irsa_arn=irsa_arns.get(addon.release_name, ""),
-        )
-        helm_apply(
-            release=addon.release_name,
-            namespace=addon.namespace,
-            chart=addon.chart,
-            version=addon.version,
-            set_args={**addon.default_set_args, **extra, **node_selector_set},
+        register_agent(
+            control_plane_url=args.control_plane_url,
+            token=args.token,
+            namespace=args.namespace,
             dry_run=dry,
         )
+
+        addons = provider.addons(
+            cluster_autoscaler_role_arn=args.cluster_autoscaler_role_arn,
+            efs_csi_driver_role_arn=args.efs_csi_driver_role_arn,
+            external_secrets_role_arn=args.external_secrets_role_arn,
+            alb_controller_role_arn=args.alb_controller_role_arn,
+            vpc_id=args.vpc_id,
+        )
+
+        # Filter out disabled addons
+        skip = set()
+        if args.no_cluster_autoscaler:
+            skip.add("cluster-autoscaler")
+        if args.no_efs_csi_driver:
+            skip.add("aws-efs-csi-driver")
+        if args.no_metrics_server:
+            skip.add("metrics-server")
+        if not args.enable_alb_controller or args.no_alb_controller:
+            skip.add("aws-load-balancer-controller")
+        if args.no_external_secrets:
+            skip.add("external-secrets")
+
+        for name in skip:
+            print(f"[cogrion-bootstrap] skipping {name} (disabled)")
+        addons = [a for a in addons if a.release_name not in skip]
+
+        _install_addons(addons, node_selector_set, dry)
+
+    _ecr_login(region=getattr(args, "region", "us-east-1"), dry_run=dry)
 
     helm_apply(
         release="cplane-agent",
         namespace=args.namespace,
-        chart="oci://public.ecr.aws/quantdata/charts/cplane-agent",
+        chart=CPLANE_AGENT_CHART,
         version=args.agent_version,
         set_args={"existingSecret": "cluster-agent-credentials", **node_selector_set},
         dry_run=dry,
