@@ -22,6 +22,31 @@ class AWSProvider(BaseProvider):
         alb_controller_role_arn: str = "",
         vpc_id: str = "",
     ) -> list:
+        if not cluster_autoscaler_role_arn:
+            cluster_autoscaler_role_arn = self._ensure_irsa_role(
+                role_name=f"{self.cluster_name}-cluster-autoscaler",
+                namespace="kube-system",
+                service_account="cluster-autoscaler-aws-cluster-autoscaler",
+                policy_statements=[
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "autoscaling:DescribeAutoScalingGroups",
+                            "autoscaling:DescribeAutoScalingInstances",
+                            "autoscaling:DescribeLaunchConfigurations",
+                            "autoscaling:DescribeScalingActivities",
+                            "autoscaling:DescribeTags",
+                            "autoscaling:SetDesiredCapacity",
+                            "autoscaling:TerminateInstanceInAutoScalingGroup",
+                            "ec2:DescribeLaunchTemplateVersions",
+                            "ec2:DescribeInstanceTypes",
+                            "eks:DescribeNodegroup",
+                        ],
+                        "Resource": "*",
+                    }
+                ],
+            )
+
         cluster_autoscaler = HelmAddon(
             release_name="cluster-autoscaler",
             namespace="kube-system",
@@ -34,7 +59,7 @@ class AWSProvider(BaseProvider):
                 "awsRegion": self.region,
                 **(
                     {
-                        "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": cluster_autoscaler_role_arn
+                        "rbac.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn": cluster_autoscaler_role_arn
                     }
                     if cluster_autoscaler_role_arn
                     else {}
@@ -102,7 +127,7 @@ class AWSProvider(BaseProvider):
         )
 
         return [
-            # cluster_autoscaler,
+            cluster_autoscaler,
             efs_csi_driver,
             METRICS_SERVER,
             alb_controller,
@@ -220,6 +245,93 @@ class AWSProvider(BaseProvider):
             "Could not discover usable subnets — no public subnets and no private subnets with a NAT gateway route. "
             "Pass --node-group-subnets explicitly."
         )
+
+    def _ensure_oidc_provider(self) -> str:
+        cluster = self.eks.describe_cluster(name=self.cluster_name)["cluster"]
+        issuer_url = cluster["identity"]["oidc"]["issuer"]
+        issuer_host = issuer_url.replace("https://", "")
+        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        provider_arn = f"arn:aws:iam::{account_id}:oidc-provider/{issuer_host}"
+
+        try:
+            self.iam.get_open_id_connect_provider(OpenIDConnectProviderArn=provider_arn)
+            return provider_arn
+        except self.iam.exceptions.NoSuchEntityException:
+            pass
+
+        print(f"[aws] no OIDC provider found for cluster — associating '{issuer_host}'")
+        if self.dry_run:
+            print(f"[aws] dry-run: skipping OIDC provider creation")
+            return provider_arn
+
+        import ssl
+        import urllib.request
+
+        cert = ssl.get_server_certificate((issuer_host.split("/")[0], 443))
+        thumbprint = (
+            __import__("hashlib")
+            .sha1(ssl.PEM_cert_to_DER_cert(cert))
+            .hexdigest()
+        )
+        self.iam.create_open_id_connect_provider(
+            Url=issuer_url,
+            ClientIDList=["sts.amazonaws.com"],
+            ThumbprintList=[thumbprint],
+        )
+        return provider_arn
+
+    def _ensure_irsa_role(
+        self,
+        role_name: str,
+        namespace: str,
+        service_account: str,
+        policy_statements: list,
+    ) -> str:
+        try:
+            existing = self.iam.get_role(RoleName=role_name)["Role"]["Arn"]
+            return existing
+        except self.iam.exceptions.NoSuchEntityException:
+            pass
+
+        if self.dry_run:
+            print(f"[aws] dry-run: skipping IRSA role creation for '{role_name}'")
+            return f"arn:aws:iam::000000000000:role/{role_name}"
+
+        oidc_provider_arn = self._ensure_oidc_provider()
+        issuer_host = oidc_provider_arn.split("/", 1)[1]
+
+        print(f"[aws] creating IRSA role '{role_name}' for {namespace}/{service_account}")
+        assume_role_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Federated": oidc_provider_arn},
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                        "StringEquals": {
+                            f"{issuer_host}:sub": f"system:serviceaccount:{namespace}:{service_account}",
+                            f"{issuer_host}:aud": "sts.amazonaws.com",
+                        }
+                    },
+                }
+            ],
+        }
+
+        role_arn = self.iam.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(assume_role_policy),
+        )["Role"]["Arn"]
+
+        self.iam.put_role_policy(
+            RoleName=role_name,
+            PolicyName=f"{role_name}-policy",
+            PolicyDocument=json.dumps(
+                {"Version": "2012-10-17", "Statement": policy_statements}
+            ),
+        )
+
+        return role_arn
 
     def _ensure_node_role(self, role_name: str) -> str:
         try:
