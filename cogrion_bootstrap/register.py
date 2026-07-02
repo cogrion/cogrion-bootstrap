@@ -1,9 +1,32 @@
+import base64
 import json
 import subprocess
 import tempfile
 import os
 import urllib.request
 import urllib.error
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class RegistrationResult:
+    skipped: bool = False
+    agent_uid: str = ""
+    workspace_uid: str = ""
+    ext_account_id: str = ""
+    ext_workspace_id: str = ""
+    global_service_base_url: str = ""
+    control_plane_url: str = ""
+    mtls_expires_at: str = ""
+    mtls_client_cert: str = ""
+    mtls_client_key: str = ""
+    mtls_ca_cert: str = ""
+    git_username: str = ""
+    git_token: str = ""
+    github_app_id: str = ""
+    github_installation_id: str = ""
+    github_private_key: str = ""
 
 
 def _post_json(url: str, payload: dict) -> dict:
@@ -19,7 +42,9 @@ def _post_json(url: str, payload: dict) -> dict:
         raise RuntimeError(f"POST {url} returned HTTP {e.code}: {body}") from e
 
 
-def register_agent(control_plane_url: str, token: str, namespace: str, dry_run: bool) -> None:
+def register_agent(
+    control_plane_url: str, token: str, namespace: str, dry_run: bool
+) -> RegistrationResult:
     secret_name = "cluster-agent-credentials"
 
     # Idempotency — skip if secret already exists
@@ -29,13 +54,13 @@ def register_agent(control_plane_url: str, token: str, namespace: str, dry_run: 
     )
     if check.returncode == 0:
         print(f"[register] {secret_name} already exists — skipping registration")
-        return
+        return _read_existing_secret(secret_name, namespace)
 
     print(f"[register] registering with {control_plane_url}")
 
     if dry_run:
         print(f"[register] dry-run: would POST {control_plane_url}/api/v1/agent/register")
-        return
+        return RegistrationResult(skipped=True)
 
     result = _post_json(f"{control_plane_url}/api/v1/agent/register", {"token": token})
 
@@ -102,3 +127,51 @@ def register_agent(control_plane_url: str, token: str, namespace: str, dry_run: 
         )
 
     print(f"[register] {secret_name} written (agentUid={result.get('agentUid')})")
+    return RegistrationResult(
+        agent_uid=result.get("agentUid", ""),
+        workspace_uid=result.get("workspaceUid", ""),
+        ext_account_id=result.get("extAccountId", ""),
+        ext_workspace_id=result.get("extWorkspaceId", ""),
+        global_service_base_url=result.get("globalServiceBaseUrl", ""),
+        control_plane_url=control_plane_url,
+        mtls_expires_at=mtls.get("expiresAt", ""),
+        mtls_client_cert=client_cert,
+        mtls_client_key=client_key,
+        mtls_ca_cert=ca_cert,
+        git_username=result.get("gitPATConfig", {}).get("username", ""),
+        git_token=result.get("gitPATConfig", {}).get("token", ""),
+        github_app_id=result.get("githubAppConfig", {}).get("githubAppId", ""),
+        github_installation_id=result.get("githubAppConfig", {}).get("githubAppInstallationId", ""),
+        github_private_key=result.get("githubAppConfig", {}).get("githubAppPrivateKey", ""),
+    )
+
+
+def _read_existing_secret(secret_name: str, namespace: str) -> RegistrationResult:
+    out = subprocess.run(
+        ["kubectl", "get", "secret", secret_name, "-n", namespace, "-o", "json"],
+        capture_output=True,
+        check=True,
+    )
+    data = json.loads(out.stdout).get("data", {})
+
+    def _decode(key: str) -> str:
+        raw = data.get(key, "")
+        return base64.b64decode(raw).decode() if raw else ""
+
+    return RegistrationResult(
+        agent_uid=_decode("CPLANE_AGENT_UID"),
+        workspace_uid=_decode("CPLANE_AGENT_WORKSPACE_UID"),
+        ext_account_id=_decode("CPLANE_AGENT_EXT_ACCOUNT_ID"),
+        ext_workspace_id=_decode("CPLANE_AGENT_EXT_WORKSPACE_ID"),
+        global_service_base_url=_decode("CPLANE_AGENT_GLOBAL_SERVICE_BASE_URL"),
+        control_plane_url=_decode("CPLANE_AGENT_URL"),
+        mtls_expires_at=_decode("CPLANE_AGENT_MTLS_EXPIRES_AT"),
+        mtls_client_cert=_decode("CPLANE_AGENT_MTLS_CLIENT_CERT"),
+        mtls_client_key=_decode("CPLANE_AGENT_MTLS_CLIENT_KEY"),
+        mtls_ca_cert=_decode("CPLANE_AGENT_MTLS_CA_CERT"),
+        git_username=_decode("GIT_USERNAME"),
+        git_token=_decode("GIT_TOKEN"),
+        github_app_id=_decode("GITHUB_APP_ID"),
+        github_installation_id=_decode("GITHUB_INSTALLATION_ID"),
+        github_private_key=_decode("GITHUB_PRIVATE_KEY"),
+    )

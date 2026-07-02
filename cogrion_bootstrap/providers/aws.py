@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 
 import boto3
@@ -13,15 +14,14 @@ _POLICY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "iam", "aws")
 _IRSA_ROLES = {
     "bootstrap": (
         "bootstrap.json",
-        ["platform_id"],
+        ["platform_id", "account_id"],
         ["cogrion-system:bootstrap-sa"],
     ),
     "cluster-agent": (
         "cluster-agent.json",
         ["platform_id", "account_id"],
         [
-            "cogrion-system:cluster-agent-python-supervisor",
-            "cogrion-system:cluster-agent-python-worker",
+            "cogrion-system:cplane-agent",
         ],
     ),
     "kubeblocks": (
@@ -57,8 +57,20 @@ _IRSA_ROLES = {
 
 
 class AWSProvider(BaseProvider):
-    def __init__(self, cluster_name: str, region: str, dry_run: bool):
-        super().__init__(cluster_name=cluster_name, dry_run=dry_run)
+    def __init__(
+        self,
+        ext_account_id: str,
+        ext_workspace_id: str,
+        cluster_name: str,
+        region: str,
+        dry_run: bool,
+    ):
+        super().__init__(
+            ext_account_id=ext_account_id,
+            ext_workspace_id=ext_workspace_id,
+            cluster_name=cluster_name,
+            dry_run=dry_run,
+        )
         self.region = region
         self.eks = boto3.client("eks", region_name=region)
         self.ec2 = boto3.client("ec2", region_name=region)
@@ -160,9 +172,8 @@ class AWSProvider(BaseProvider):
 
         Returns a map of role-key -> IAM role ARN.
         """
-        platform_id = self.cluster_name
+        platform_id = self.ext_workspace_id
         account_id = self._get_account_id()
-
         format_vars = {"platform_id": platform_id, "account_id": account_id}
 
         arns: dict[str, str] = {}
@@ -289,7 +300,21 @@ class AWSProvider(BaseProvider):
             capture_output=True,
         )
         if check.returncode == 0:
-            print(f"[aws] ServiceAccount {namespace}/{name} already exists — skipping")
+            print(f"[aws] ServiceAccount {namespace}/{name} exists — patching annotation")
+            if not self.dry_run:
+                subprocess.run(
+                    [
+                        "kubectl",
+                        "annotate",
+                        "serviceaccount",
+                        name,
+                        "-n",
+                        namespace,
+                        f"eks.amazonaws.com/role-arn={role_arn}",
+                        "--overwrite",
+                    ],
+                    check=True,
+                )
             return
 
         print(f"[aws] creating ServiceAccount {namespace}/{name}")
@@ -375,23 +400,8 @@ class AWSProvider(BaseProvider):
         service_accounts: list[str],
     ) -> str:
         """Idempotently create an IRSA role and return its ARN."""
-        try:
-            arn = self.iam.get_role(RoleName=role_name)["Role"]["Arn"]
-            print(f"[aws] IRSA role '{role_name}' already exists")
-            return arn
-        except self.iam.exceptions.NoSuchEntityException:
-            pass
-
-        print(f"[aws] creating IRSA role '{role_name}'")
-        if self.dry_run:
-            print(f"[aws] dry-run: skipping IRSA role creation")
-            return f"arn:aws:iam::000000000000:role/{role_name}"
-
-        policy_arn = self._ensure_policy(policy_name, policy_doc)
         oidc_arn, oidc_url = self._get_oidc()
-
         subjects = [f"system:serviceaccount:{sa}" for sa in service_accounts]
-
         trust = {
             "Version": "2012-10-17",
             "Statement": [
@@ -409,13 +419,30 @@ class AWSProvider(BaseProvider):
             ],
         }
 
+        try:
+            arn = self.iam.get_role(RoleName=role_name)["Role"]["Arn"]
+            print(f"[aws] IRSA role '{role_name}' exists — updating trust policy")
+            if not self.dry_run:
+                self.iam.update_assume_role_policy(
+                    RoleName=role_name,
+                    PolicyDocument=json.dumps(trust),
+                )
+            return arn
+        except self.iam.exceptions.NoSuchEntityException:
+            pass
+
+        print(f"[aws] creating IRSA role '{role_name}'")
+        if self.dry_run:
+            print(f"[aws] dry-run: skipping IRSA role creation")
+            return f"arn:aws:iam::000000000000:role/{role_name}"
+
+        policy_arn = self._ensure_policy(policy_name, policy_doc)
         arn = self.iam.create_role(
             RoleName=role_name,
             AssumeRolePolicyDocument=json.dumps(trust),
         )[
             "Role"
         ]["Arn"]
-
         self.iam.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
         print(f"[aws] IRSA role created: {arn}")
         return arn
@@ -580,6 +607,11 @@ def _load_policy(filename: str, **vars) -> str:
         content = f.read()
     for key, value in vars.items():
         content = content.replace("{" + key + "}", value)
+    unresolved = re.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", content)
+    if unresolved:
+        raise ValueError(f"Unresolved placeholders in {filename}: {unresolved}")
+    json.loads(content)  # validate structure
+    print(f"[aws] Loaded policy {filename}:\n", content)
     return content
 
 

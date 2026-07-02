@@ -1,5 +1,12 @@
-import subprocess
-from cogrion_bootstrap.helm import helm_apply, is_externally_managed
+import json
+import pytest
+from unittest.mock import MagicMock
+from cogrion_bootstrap.helm import (
+    helm_apply,
+    ensure_helm_repos,
+    is_externally_managed,
+    _helm_status,
+)
 
 
 def test_is_externally_managed_returns_true_when_not_helm(mocker):
@@ -79,6 +86,23 @@ def test_helm_apply_deletes_stuck_release(mocker):
     assert "cplane-agent" in delete_call.args[0]
 
 
+def test_helm_apply_rolls_back_failed_release(mocker):
+    mocker.patch("cogrion_bootstrap.helm._helm_status", return_value="failed")
+    run = mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run", return_value=mocker.MagicMock(returncode=0)
+    )
+
+    helm_apply(
+        release="cplane-agent",
+        namespace="cogrion-system",
+        chart="oci://example/chart",
+        dry_run=False,
+    )
+
+    rollback_call = next(c for c in run.call_args_list if "rollback" in c.args[0])
+    assert "cplane-agent" in rollback_call.args[0]
+
+
 def test_helm_apply_skips_non_helm_owned_release(mocker):
     mocker.patch("cogrion_bootstrap.helm._helm_status", return_value="")
     mocker.patch(
@@ -93,7 +117,6 @@ def test_helm_apply_skips_non_helm_owned_release(mocker):
             ),
         ),
     )
-    # should not raise
     helm_apply(
         release="metrics-server",
         namespace="kube-system",
@@ -133,3 +156,82 @@ def test_helm_apply_skips_empty_set_values(mocker):
 
     upgrade_call = next(c for c in run.call_args_list if "upgrade" in c.args[0])
     assert "someKey" not in " ".join(upgrade_call.args[0])
+
+
+def test_helm_status_returns_deployed(mocker):
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout=json.dumps({"info": {"status": "deployed"}})),
+    )
+    assert _helm_status("my-release", "default") == "deployed"
+
+
+def test_helm_status_returns_empty_on_missing_release(mocker):
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        return_value=MagicMock(returncode=1, stdout=""),
+    )
+    assert _helm_status("my-release", "default") == ""
+
+
+def test_helm_status_returns_empty_on_invalid_json(mocker):
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="not-json"),
+    )
+    assert _helm_status("my-release", "default") == ""
+
+
+def test_ensure_helm_repos_skips_existing_repo(mocker):
+    run = mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        side_effect=[
+            MagicMock(returncode=0, stdout=json.dumps([{"name": "eks"}])),
+            MagicMock(returncode=0),  # repo update
+        ],
+    )
+
+    ensure_helm_repos({"eks": "https://aws.github.io/eks-charts"}, dry_run=False)
+
+    calls = [c.args[0] for c in run.call_args_list]
+    assert not any("add" in c for c in calls)
+
+
+def test_ensure_helm_repos_adds_missing_repo(mocker):
+    run = mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        side_effect=[
+            MagicMock(returncode=0, stdout="[]"),
+            MagicMock(returncode=0),  # repo add
+            MagicMock(returncode=0),  # repo update
+        ],
+    )
+
+    ensure_helm_repos({"eks": "https://aws.github.io/eks-charts"}, dry_run=False)
+
+    add_call = run.call_args_list[1].args[0]
+    assert add_call == ["helm", "repo", "add", "eks", "https://aws.github.io/eks-charts"]
+
+
+def test_ensure_helm_repos_dry_run_skips_add_and_update(mocker):
+    run = mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="[]"),
+    )
+
+    ensure_helm_repos({"eks": "https://aws.github.io/eks-charts"}, dry_run=True)
+
+    assert run.call_count == 1
+
+
+def test_ensure_helm_repos_handles_invalid_json_in_list(mocker):
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        side_effect=[
+            MagicMock(returncode=0, stdout="bad-json"),
+            MagicMock(returncode=0),  # repo add
+            MagicMock(returncode=0),  # repo update
+        ],
+    )
+
+    ensure_helm_repos({"eks": "https://aws.github.io/eks-charts"}, dry_run=False)

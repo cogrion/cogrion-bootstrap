@@ -2,6 +2,14 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "STSForIRSA",
+      "Effect": "Allow",
+      "Action": [
+        "sts:AssumeRoleWithWebIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
