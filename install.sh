@@ -30,7 +30,7 @@ curl -fsSL "${REPO_URL}/pyproject.toml"                           -o "$INSTALL_D
 curl -fsSL "${REPO_URL}/uv.lock"                                  -o "$INSTALL_DIR/uv.lock"
 
 mkdir -p "$INSTALL_DIR/cogrion_bootstrap/providers"
-for f in __init__.py cli.py register.py helm.py addons.py; do
+for f in __init__.py cli.py constants.py register.py helm.py addons.py; do
   curl -fsSL "${REPO_URL}/cogrion_bootstrap/${f}" -o "$INSTALL_DIR/cogrion_bootstrap/${f}"
 done
 for f in __init__.py base.py aws.py; do
