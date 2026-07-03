@@ -23,7 +23,7 @@ Or end-to-end without a live cluster:
 ```bash
 uv run python -m cogrion_bootstrap.cli \
   --provider aws \
-  --token test \
+  --token <test> \
   --cluster-name <my-cluster> \
   --region ap-southeast-1 \
   --dry-run
