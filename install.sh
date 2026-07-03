@@ -37,6 +37,11 @@ for f in __init__.py base.py aws.py; do
   curl -fsSL "${REPO_URL}/cogrion_bootstrap/providers/${f}" \
     -o "$INSTALL_DIR/cogrion_bootstrap/providers/${f}"
 done
+mkdir -p "$INSTALL_DIR/iam/aws"
+for f in bootstrap.json cluster-agent.json kubeblocks.json cluster-autoscaler.json \
+         efs-csi-driver.json alb-controller.json external-secrets.json; do
+  curl -fsSL "${REPO_URL}/iam/aws/${f}" -o "$INSTALL_DIR/iam/aws/${f}"
+done
 
 echo "[cogrion] running bootstrap..."
 cd "$INSTALL_DIR"
