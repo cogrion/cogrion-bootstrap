@@ -185,11 +185,57 @@ def test_ensure_irsa_role_skips_if_exists(mocker):
     provider.iam.get_role = MagicMock(
         return_value={"Role": {"Arn": "arn:aws:iam::123:role/existing"}}
     )
+    provider._ensure_policy = MagicMock(return_value="arn:aws:iam::123:policy/existing-policy")
 
     arn = provider._ensure_irsa_role("existing-role", "existing-policy", "{}", ["ns:sa"])
 
     assert arn == "arn:aws:iam::123:role/existing"
     provider.iam.create_role.assert_not_called()
+
+
+def test_ensure_irsa_role_updates_policy_even_if_role_already_exists(mocker):
+    """Reproduces the reported bug: when an IRSA role already exists,
+    _ensure_irsa_role updates only the trust policy and returns early — it
+    never calls _ensure_policy, so IAM policy content changes (e.g. edited
+    iam/aws/*.json, or a changed {ext_account_id} placeholder) never reach
+    AWS on any bootstrap run after the very first one that created the role."""
+    provider = _make_provider(mocker)
+    provider.iam.get_role = MagicMock(
+        return_value={"Role": {"Arn": "arn:aws:iam::123:role/existing"}}
+    )
+    provider._ensure_policy = MagicMock(return_value="arn:aws:iam::123:policy/existing-policy")
+
+    arn = provider._ensure_irsa_role(
+        "existing-role", "existing-policy", '{"Statement": []}', ["ns:sa"]
+    )
+
+    assert arn == "arn:aws:iam::123:role/existing"
+    provider._ensure_policy.assert_called_once_with("existing-policy", '{"Statement": []}')
+    provider.iam.attach_role_policy.assert_called_once_with(
+        RoleName="existing-role", PolicyArn="arn:aws:iam::123:policy/existing-policy"
+    )
+
+
+def test_ensure_irsa_role_dry_run_skips_policy_update_when_role_exists(mocker):
+    mocker.patch("cogrion_bootstrap.providers.aws.boto3.client", return_value=MagicMock())
+    provider = AWSProvider(
+        ext_account_id="111122223333",
+        ext_workspace_id="w-test01",
+        cluster_name="my-cluster",
+        region="ap-southeast-1",
+        dry_run=True,
+    )
+    provider.iam.get_role = MagicMock(
+        return_value={"Role": {"Arn": "arn:aws:iam::123:role/existing"}}
+    )
+    provider._ensure_policy = MagicMock()
+
+    arn = provider._ensure_irsa_role("existing-role", "existing-policy", "{}", ["ns:sa"])
+
+    assert arn == "arn:aws:iam::123:role/existing"
+    provider.iam.update_assume_role_policy.assert_not_called()
+    provider._ensure_policy.assert_not_called()
+    provider.iam.attach_role_policy.assert_not_called()
 
 
 def test_ensure_irsa_role_creates_role_and_policy(mocker):
@@ -282,23 +328,27 @@ def test_ensure_iam_passes_correct_service_accounts(mocker):
 
 
 def test_load_policy_substitutes_all_vars(mocker):
-    doc = _load_policy("bootstrap.json", platform_id="w-test01")
+    doc = _load_policy("bootstrap.json", ext_workspace_id="w-test01")
 
-    assert "{platform_id}" not in doc
+    assert "{ext_workspace_id}" not in doc
     assert "w-test01" in doc
     json.loads(doc)  # must remain valid JSON
 
 
 def test_load_policy_raises_on_unresolved_placeholder(mocker):
     with pytest.raises(ValueError, match="Unresolved placeholders"):
-        _load_policy("bootstrap.json")  # platform_id not passed
+        _load_policy("bootstrap.json")  # ext_workspace_id not passed
 
 
-def test_load_policy_cluster_agent_substitutes_both_vars():
-    doc = _load_policy("cluster-agent.json", platform_id="w-test01", account_id="123456789012")
+def test_load_policy_cluster_agent_substitutes_all_vars():
+    doc = _load_policy(
+        "cluster-agent.json",
+        ext_workspace_id="w-test01",
+        ext_account_id="devlocalaws",
+    )
 
-    assert "{platform_id}" not in doc
-    assert "{account_id}" not in doc
+    assert "{ext_workspace_id}" not in doc
+    assert "{ext_account_id}" not in doc
     json.loads(doc)
 
 
@@ -470,12 +520,123 @@ def test_ensure_node_role_creates_and_attaches_policies(mocker):
 def test_ensure_policy_skips_if_exists(mocker):
     provider = _make_provider(mocker)
     provider._get_account_id = MagicMock(return_value="123456789012")
-    provider.iam.get_policy = MagicMock(return_value={"Policy": {}})
+    provider.iam.get_policy = MagicMock(return_value={"Policy": {"DefaultVersionId": "v1"}})
+    provider.iam.get_policy_version = MagicMock(return_value={"PolicyVersion": {"Document": {}}})
 
     arn = provider._ensure_policy("my-policy", "{}")
 
     assert "my-policy" in arn
     provider.iam.create_policy.assert_not_called()
+    provider.iam.create_policy_version.assert_not_called()
+
+
+def test_ensure_policy_updates_when_ext_account_id_placeholder_changes(mocker):
+    """Reproduces the reported bug: re-running bootstrap with a different
+    {ext_account_id} (e.g. tfstate bucket suffix corrected from a wrong value)
+    resolves to a different policy document via _load_policy, but has no
+    effect on an already-created IAM policy — _ensure_policy currently
+    returns early on "already exists" without ever comparing/pushing the new
+    document."""
+    provider = _make_provider(mocker)
+    provider._get_account_id = MagicMock(return_value="123456789012")
+    policy_arn = "arn:aws:iam::123456789012:policy/w-test01-cluster-agent-policy"
+
+    old_doc = json.loads(
+        _load_policy(
+            "cluster-agent.json", ext_workspace_id="w-test01", ext_account_id="wrong-account"
+        )
+    )
+    new_doc = json.loads(
+        _load_policy(
+            "cluster-agent.json", ext_workspace_id="w-test01", ext_account_id="devlocalaws"
+        )
+    )
+    assert old_doc != new_doc  # sanity check the two placeholders actually resolve differently
+
+    provider.iam.get_policy = MagicMock(
+        return_value={"Policy": {"Arn": policy_arn, "DefaultVersionId": "v1"}}
+    )
+    provider.iam.get_policy_version = MagicMock(
+        return_value={"PolicyVersion": {"Document": old_doc}}
+    )
+    provider.iam.list_policy_versions = MagicMock(
+        return_value={"Versions": [{"VersionId": "v1", "IsDefaultVersion": True}]}
+    )
+
+    arn = provider._ensure_policy("w-test01-cluster-agent-policy", json.dumps(new_doc))
+
+    assert arn == policy_arn
+    provider.iam.create_policy_version.assert_called_once()
+    call_kwargs = provider.iam.create_policy_version.call_args.kwargs
+    assert call_kwargs["PolicyArn"] == policy_arn
+    assert json.loads(call_kwargs["PolicyDocument"]) == new_doc
+    assert call_kwargs["SetAsDefault"] is True
+
+
+def test_ensure_policy_updates_when_aws_account_id_placeholder_changes(mocker):
+    """Same scenario as above but for {aws_account_id} (the numeric AWS
+    account, distinct from {ext_account_id}) — not currently used by any
+    shipped policy file, but must still trigger an update through
+    _ensure_policy's generic document-diff, since a future policy (or a
+    workspace moved to a different AWS account) can rely on it."""
+    provider = _make_provider(mocker)
+    provider._get_account_id = MagicMock(return_value="123456789012")
+    policy_arn = "arn:aws:iam::123456789012:policy/my-policy"
+
+    template = '{{"Version": "2012-10-17", "Statement": [{{"Sid": "AccountScoped", "Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::acct-{aws_account_id}-bucket*"}}]}}'
+    old_doc = json.loads(template.format(aws_account_id="111111111111"))
+    new_doc = json.loads(template.format(aws_account_id="222222222222"))
+    assert old_doc != new_doc
+
+    provider.iam.get_policy = MagicMock(
+        return_value={"Policy": {"Arn": policy_arn, "DefaultVersionId": "v1"}}
+    )
+    provider.iam.get_policy_version = MagicMock(
+        return_value={"PolicyVersion": {"Document": old_doc}}
+    )
+    provider.iam.list_policy_versions = MagicMock(
+        return_value={"Versions": [{"VersionId": "v1", "IsDefaultVersion": True}]}
+    )
+
+    arn = provider._ensure_policy("my-policy", json.dumps(new_doc))
+
+    assert arn == policy_arn
+    provider.iam.create_policy_version.assert_called_once()
+    call_kwargs = provider.iam.create_policy_version.call_args.kwargs
+    assert call_kwargs["PolicyArn"] == policy_arn
+    assert json.loads(call_kwargs["PolicyDocument"]) == new_doc
+    assert call_kwargs["SetAsDefault"] is True
+
+
+def test_ensure_policy_skips_update_when_document_unchanged(mocker):
+    """Same content (just re-ordered/re-serialized) must not trigger a spurious
+    policy version — IAM caps policies at 5 versions, so a no-op diff must
+    stay a no-op."""
+    provider = _make_provider(mocker)
+    provider._get_account_id = MagicMock(return_value="123456789012")
+    policy_arn = "arn:aws:iam::123456789012:policy/my-policy"
+    doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "Same",
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::same-bucket*",
+            }
+        ],
+    }
+
+    provider.iam.get_policy = MagicMock(
+        return_value={"Policy": {"Arn": policy_arn, "DefaultVersionId": "v1"}}
+    )
+    provider.iam.get_policy_version = MagicMock(return_value={"PolicyVersion": {"Document": doc}})
+
+    # Re-serialized (different key order / whitespace) but semantically identical.
+    arn = provider._ensure_policy("my-policy", json.dumps(doc, indent=2))
+
+    assert arn == policy_arn
+    provider.iam.create_policy_version.assert_not_called()
 
 
 def test_ensure_policy_creates_if_missing(mocker):
@@ -607,3 +768,40 @@ def test_discover_eks_subnets_uses_main_route_table_when_no_subnet_association(m
 
     assert result == ["subnet-priv"]
     assert provider.ec2.describe_route_tables.call_count == 2
+
+
+def test_prune_oldest_policy_version_noop_under_limit(mocker):
+    provider = _make_provider(mocker)
+    policy_arn = "arn:aws:iam::123456789012:policy/my-policy"
+    provider.iam.list_policy_versions = MagicMock(
+        return_value={
+            "Versions": [
+                {"VersionId": "v1", "IsDefaultVersion": True},
+                {"VersionId": "v2", "IsDefaultVersion": False},
+            ]
+        }
+    )
+
+    provider._prune_oldest_policy_version_if_at_limit(policy_arn)
+
+    provider.iam.delete_policy_version.assert_not_called()
+
+
+def test_prune_oldest_policy_version_deletes_oldest_non_default_at_limit(mocker):
+    provider = _make_provider(mocker)
+    policy_arn = "arn:aws:iam::123456789012:policy/my-policy"
+    provider.iam.list_policy_versions = MagicMock(
+        return_value={
+            "Versions": [
+                {"VersionId": "v5", "IsDefaultVersion": True, "CreateDate": "2026-07-05"},
+                {"VersionId": "v1", "IsDefaultVersion": False, "CreateDate": "2026-07-01"},
+                {"VersionId": "v3", "IsDefaultVersion": False, "CreateDate": "2026-07-03"},
+                {"VersionId": "v2", "IsDefaultVersion": False, "CreateDate": "2026-07-02"},
+                {"VersionId": "v4", "IsDefaultVersion": False, "CreateDate": "2026-07-04"},
+            ]
+        }
+    )
+
+    provider._prune_oldest_policy_version_if_at_limit(policy_arn)
+
+    provider.iam.delete_policy_version.assert_called_once_with(PolicyArn=policy_arn, VersionId="v1")

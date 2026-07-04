@@ -59,3 +59,5 @@ uv run pytest
 - If a test is hard to read in 30 seconds, it is too complex — simplify or delete it
 
 The goal is tests a junior developer can read, understand, and fix without context.
+
+- Before implementing any change — bug fix, new behavior, refactor — make sure a test encodes what you actually want: update an existing test if one already covers that path but asserts the wrong thing, or add a new one otherwise. The test should fail against the current code and pass once the change lands. Writing it first is what forces the intended behavior to be unambiguous before you touch the implementation.

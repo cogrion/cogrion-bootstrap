@@ -26,6 +26,7 @@ uv run python -m cogrion_bootstrap.cli \
   --token <test> \
   --cluster-name <my-cluster> \
   --region ap-southeast-1 \
+  --tofu-backend-bucket <s3-state-bucket> \
   --dry-run
 ```
 
