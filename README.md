@@ -25,7 +25,8 @@ curl -fsSL https://raw.githubusercontent.com/cogrion/cluster-bootstrap/main/inst
   --provider aws \
   --token <bootstrap-token> \
   --cluster-name <eks-cluster-name> \
-  --region ap-southeast-1
+  --region ap-southeast-1 \
+  --tofu-backend-bucket <s3-state-bucket>
 ```
 
 To target a different environment (e.g. staging):
@@ -53,6 +54,9 @@ curl -fsSL https://raw.githubusercontent.com/cogrion/cluster-bootstrap/main/inst
 --node-role-arn              IAM role ARN for the node group (auto-created if omitted)
 --enable-alb-controller      Install AWS Load Balancer Controller (requires --vpc-id)
 --vpc-id                     VPC ID (required when --enable-alb-controller)
+--tofu-backend-bucket        S3 bucket for OpenTofu remote state (required for stack provisioning)
+--tofu-backend-region        AWS region of the state bucket (defaults to --region)
+--tofu-backend-key-prefix    Key prefix within the state bucket (optional)
 
 IRSA role ARNs (optional — addon service accounts use instance profile if omitted):
   --cluster-autoscaler-role-arn

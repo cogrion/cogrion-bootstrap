@@ -14,12 +14,12 @@ _POLICY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "iam", "aws")
 _IRSA_ROLES = {
     "bootstrap": (
         "bootstrap.json",
-        ["platform_id", "account_id"],
+        ["ext_workspace_id", "aws_account_id"],
         ["cogrion-system:bootstrap-sa"],
     ),
     "cluster-agent": (
         "cluster-agent.json",
-        ["platform_id", "account_id"],
+        ["ext_workspace_id", "aws_account_id", "ext_account_id"],
         [
             "cogrion-system:cplane-agent",
         ],
@@ -172,14 +172,18 @@ class AWSProvider(BaseProvider):
 
         Returns a map of role-key -> IAM role ARN.
         """
-        platform_id = self.ext_workspace_id
-        account_id = self._get_account_id()
-        format_vars = {"platform_id": platform_id, "account_id": account_id}
+        ext_workspace_id = self.ext_workspace_id
+        aws_account_id = self._get_account_id()
+        format_vars = {
+            "ext_workspace_id": ext_workspace_id,
+            "aws_account_id": aws_account_id,
+            "ext_account_id": self.ext_account_id,
+        }
 
         arns: dict[str, str] = {}
         for role_key, (policy_file, var_keys, service_accounts) in _IRSA_ROLES.items():
-            role_name = f"{platform_id}-{role_key}-role"
-            policy_name = f"{platform_id}-{role_key}-policy"
+            role_name = f"{ext_workspace_id}-{role_key}-role"
+            policy_name = f"{ext_workspace_id}-{role_key}-policy"
             vars_for_policy = {k: format_vars[k] for k in var_keys}
             policy_doc = _load_policy(policy_file, **vars_for_policy)
             arn = self._ensure_irsa_role(
@@ -381,12 +385,10 @@ class AWSProvider(BaseProvider):
         issuer = cluster["cluster"]["identity"]["oidc"]["issuer"]
         oidc_url = issuer.replace("https://", "")
 
-        account_id = self._get_account_id()
+        aws_account_id = self._get_account_id()
         region = self.region
         oidc_id = oidc_url.split("/")[-1]
-        arn = (
-            f"arn:aws:iam::{account_id}:oidc-provider/oidc.eks.{region}.amazonaws.com/id/{oidc_id}"
-        )
+        arn = f"arn:aws:iam::{aws_account_id}:oidc-provider/oidc.eks.{region}.amazonaws.com/id/{oidc_id}"
 
         self._cached_oidc_arn = arn
         self._cached_oidc_url = oidc_url
@@ -421,46 +423,84 @@ class AWSProvider(BaseProvider):
 
         try:
             arn = self.iam.get_role(RoleName=role_name)["Role"]["Arn"]
+            role_exists = True
             print(f"[aws] IRSA role '{role_name}' exists — updating trust policy")
-            if not self.dry_run:
-                self.iam.update_assume_role_policy(
-                    RoleName=role_name,
-                    PolicyDocument=json.dumps(trust),
-                )
-            return arn
         except self.iam.exceptions.NoSuchEntityException:
-            pass
+            role_exists = False
+            arn = f"arn:aws:iam::000000000000:role/{role_name}"
 
-        print(f"[aws] creating IRSA role '{role_name}'")
         if self.dry_run:
-            print(f"[aws] dry-run: skipping IRSA role creation")
-            return f"arn:aws:iam::000000000000:role/{role_name}"
+            print(f"[aws] dry-run: skipping IRSA role/policy changes for '{role_name}'")
+            return arn
+
+        # _ensure_policy runs regardless of whether the role already exists —
+        # an existing role does not imply its attached policy document is
+        # still up to date (e.g. after editing iam/aws/*.json).
+        if role_exists:
+            self.iam.update_assume_role_policy(
+                RoleName=role_name,
+                PolicyDocument=json.dumps(trust),
+            )
+        else:
+            print(f"[aws] creating IRSA role '{role_name}'")
 
         policy_arn = self._ensure_policy(policy_name, policy_doc)
-        arn = self.iam.create_role(
-            RoleName=role_name,
-            AssumeRolePolicyDocument=json.dumps(trust),
-        )[
-            "Role"
-        ]["Arn"]
+
+        if not role_exists:
+            arn = self.iam.create_role(
+                RoleName=role_name,
+                AssumeRolePolicyDocument=json.dumps(trust),
+            )["Role"]["Arn"]
+            print(f"[aws] IRSA role created: {arn}")
+
         self.iam.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
-        print(f"[aws] IRSA role created: {arn}")
         return arn
 
     def _ensure_policy(self, policy_name: str, policy_doc: str) -> str:
-        """Idempotently create a customer-managed policy and return its ARN."""
-        account_id = self._get_account_id()
-        policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
-        try:
-            self.iam.get_policy(PolicyArn=policy_arn)
-            print(f"[aws] IAM policy '{policy_name}' already exists")
-            return policy_arn
-        except self.iam.exceptions.NoSuchEntityException:
-            pass
+        """Idempotently create a customer-managed policy and return its ARN.
 
-        print(f"[aws] creating IAM policy '{policy_name}'")
-        self.iam.create_policy(PolicyName=policy_name, PolicyDocument=policy_doc)
+        If the policy already exists, its current default version is compared
+        against `policy_doc` and a new version is pushed only when they
+        differ — a resolved-but-unchanged document (e.g. same placeholders,
+        different key order) must not create a spurious version, since IAM
+        caps managed policies at 5 versions.
+        """
+        aws_account_id = self._get_account_id()
+        policy_arn = f"arn:aws:iam::{aws_account_id}:policy/{policy_name}"
+        try:
+            policy = self.iam.get_policy(PolicyArn=policy_arn)["Policy"]
+        except self.iam.exceptions.NoSuchEntityException:
+            print(f"[aws] creating IAM policy '{policy_name}'")
+            self.iam.create_policy(PolicyName=policy_name, PolicyDocument=policy_doc)
+            return policy_arn
+
+        current_doc = self.iam.get_policy_version(
+            PolicyArn=policy_arn, VersionId=policy["DefaultVersionId"]
+        )["PolicyVersion"]["Document"]
+
+        if current_doc == json.loads(policy_doc):
+            print(f"[aws] IAM policy '{policy_name}' already up to date")
+            return policy_arn
+
+        print(f"[aws] IAM policy '{policy_name}' exists but changed — pushing new version")
+        self._prune_oldest_policy_version_if_at_limit(policy_arn)
+        self.iam.create_policy_version(
+            PolicyArn=policy_arn, PolicyDocument=policy_doc, SetAsDefault=True
+        )
         return policy_arn
+
+    def _prune_oldest_policy_version_if_at_limit(self, policy_arn: str) -> None:
+        """IAM allows at most 5 versions per managed policy. Delete the oldest
+        non-default version before pushing a new one if already at the cap."""
+        versions = self.iam.list_policy_versions(PolicyArn=policy_arn)["Versions"]
+        if len(versions) < 5:
+            return
+        oldest = min(
+            (v for v in versions if not v["IsDefaultVersion"]),
+            key=lambda v: v["CreateDate"],
+        )
+        print(f"[aws] policy at 5-version limit — deleting oldest version {oldest['VersionId']}")
+        self.iam.delete_policy_version(PolicyArn=policy_arn, VersionId=oldest["VersionId"])
 
     def _node_group_status(self, name: str) -> str:
         try:

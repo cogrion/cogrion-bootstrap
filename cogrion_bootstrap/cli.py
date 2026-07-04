@@ -142,6 +142,21 @@ def main():
         default=False,
         help="Skip IRSA role creation (use when roles are pre-provisioned by Terraform)",
     )
+    aws.add_argument(
+        "--tofu-backend-bucket",
+        default="",
+        help="S3 bucket for OpenTofu remote state (required for stack provisioning)",
+    )
+    aws.add_argument(
+        "--tofu-backend-region",
+        default="",
+        help="AWS region of the Tofu state bucket (defaults to --region if omitted)",
+    )
+    aws.add_argument(
+        "--tofu-backend-key-prefix",
+        default="",
+        help="Key prefix within the Tofu state bucket (optional)",
+    )
 
     # Addon toggles
     addon_group = parser.add_argument_group("Addons")
@@ -232,6 +247,16 @@ def main():
 
     _ecr_login(region=getattr(args, "region", "us-east-1"), dry_run=dry)
 
+    tofu_set: dict = {}
+    if args.provider == "aws":
+        tofu_backend_bucket = args.tofu_backend_bucket
+        tofu_backend_region = args.tofu_backend_region or args.region
+        if tofu_backend_bucket:
+            tofu_set["tofu.backendBucket"] = tofu_backend_bucket
+            tofu_set["tofu.backendRegion"] = tofu_backend_region
+        if args.tofu_backend_key_prefix:
+            tofu_set["tofu.backendKeyPrefix"] = args.tofu_backend_key_prefix
+
     helm_apply(
         release="cplane-agent",
         namespace=args.namespace,
@@ -241,6 +266,7 @@ def main():
             "existingSecret": "cluster-agent-credentials",
             "serviceAccount.create": "false",
             "serviceAccount.name": "cplane-agent",
+            **tofu_set,
             **node_selector_set,
         },
         dry_run=dry,

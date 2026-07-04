@@ -13,8 +13,8 @@
         "s3:GetBucketPublicAccessBlock"
       ],
       "Resource": [
-        "arn:aws:s3:::{platform_id}*",
-        "arn:aws:s3:::{platform_id}*/*"
+        "arn:aws:s3:::{ext_workspace_id}*",
+        "arn:aws:s3:::{ext_workspace_id}*/*"
       ]
     }
   ]
