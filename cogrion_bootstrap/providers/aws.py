@@ -428,12 +428,15 @@ class AWSProvider(BaseProvider):
             print(f"[aws] ingress rule already present on {group_id} — skipping")
 
     def _ensure_node_security_group(self, vpc_id: str, cluster_sg_id: str) -> str:
-        """Idempotently create the shared node security group and the minimum
+        """Idempotently create the shared node security group and the
         cross-SG rules required for EKS managed node groups that use a
         distinct security group from the cluster's own — mirrors
         terraform-workspace-infra-aws/modules/workspace-cluster/eks.tf's
-        node_security_group_additional_rules / security_group_additional_rules
-        (self all-traffic, cluster<->node all-traffic, node ephemeral ports).
+        node_security_group_additional_rules (self all-traffic, cluster<->node
+        all-traffic in both directions). Both cross-SG directions must be
+        all-traffic, not just kubelet ports — a single shared node SG gets
+        that symmetric trust for free via self-reference; splitting it into
+        two SGs means both directions have to be granted explicitly.
         """
         name = f"{self.cluster_name}-node"
         resp = self.ec2.describe_security_groups(
@@ -476,31 +479,14 @@ class AWSProvider(BaseProvider):
         self._authorize_ingress_idempotent(
             sg_id, [{"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": cluster_sg_id}]}]
         )
-        # node -> control-plane API (kubelet). Not always present by default on a
-        # plain EKS-auto-created cluster SG (only self-referencing), unlike a
-        # terraform-aws-modules/eks-managed cluster SG which already has this.
+        # node -> cluster SG, all traffic. A plain EKS-auto-created cluster SG only
+        # self-references by default, unlike a terraform-aws-modules/eks-managed
+        # cluster SG. Scoping this to just kubelet ports (443, 1025-65535) is not
+        # enough: any workload on the cluster SG (e.g. coredns) needs to receive
+        # traffic from nodes on this separate SG too (e.g. DNS on port 53), which
+        # a single shared node SG would get for free via self-reference.
         self._authorize_ingress_idempotent(
-            cluster_sg_id,
-            [
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 443,
-                    "ToPort": 443,
-                    "UserIdGroupPairs": [{"GroupId": sg_id}],
-                }
-            ],
-        )
-        # ingress_nodes_ephemeral_ports_tcp — nodes on ephemeral ports, into the cluster SG
-        self._authorize_ingress_idempotent(
-            cluster_sg_id,
-            [
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 1025,
-                    "ToPort": 65535,
-                    "UserIdGroupPairs": [{"GroupId": sg_id}],
-                }
-            ],
+            cluster_sg_id, [{"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": sg_id}]}]
         )
 
         print(f"[aws] node security group '{name}' created: {sg_id}")
