@@ -307,6 +307,45 @@ def test_main_aws_no_create_irsa(mocker):
     provider_mock.ensure_iam.assert_not_called()
 
 
+def test_main_aws_agent_set_overrides_reach_cplane_agent_helm_apply(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--agent-set",
+            "autoscaling.enabled=false",
+            "--agent-set",
+            "autoscaling.maxReplicas=1",
+            "--dry-run",
+        ],
+    )
+    reg_result = MagicMock(ext_account_id="111122223333", ext_workspace_id="w-test01")
+    mocker.patch("cogrion_bootstrap.cli.register_agent", return_value=reg_result)
+    provider_mock = MagicMock()
+    provider_mock.ensure_iam = MagicMock(return_value={})
+    mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider", return_value=provider_mock)
+    helm_apply = mocker.patch("cogrion_bootstrap.cli.helm_apply")
+
+    from cogrion_bootstrap.cli import main
+
+    main()
+
+    agent_call = next(
+        call for call in helm_apply.call_args_list if call.kwargs["release"] == "cplane-agent"
+    )
+    set_args = agent_call.kwargs["set_args"]
+    assert set_args["autoscaling.enabled"] == "false"
+    assert set_args["autoscaling.maxReplicas"] == "1"
+
+
 def test_main_aws_addon_disable_flags(mocker):
     mocker.patch(
         "sys.argv",

@@ -70,6 +70,16 @@ def _install_addons(addons: list, node_selector_set: dict, dry_run: bool) -> Non
             _kubectl_apply(addon.manifest_url, dry_run=dry_run)
 
 
+def _parse_set_args(pairs: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            raise ValueError(f"invalid --agent-set value {pair!r}, expected KEY=VALUE")
+        result[key] = value
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cogrion-bootstrap",
@@ -103,6 +113,14 @@ def main():
         "--node-group-label",
         default="",
         help="Value for nodeSelector.nodegroup on all Helm releases",
+    )
+    parser.add_argument(
+        "--agent-set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra --set override for the cplane-agent Helm release (repeatable), "
+        "e.g. --agent-set autoscaling.enabled=false",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print actions without executing anything"
@@ -259,6 +277,8 @@ def main():
         if args.tofu_backend_key_prefix:
             tofu_set["tofu.backendKeyPrefix"] = args.tofu_backend_key_prefix
 
+    agent_set = _parse_set_args(args.agent_set)
+
     helm_apply(
         release="cplane-agent",
         namespace=args.namespace,
@@ -270,6 +290,7 @@ def main():
             "serviceAccount.name": "cplane-agent",
             **tofu_set,
             **node_selector_set,
+            **agent_set,
         },
         dry_run=dry,
     )
