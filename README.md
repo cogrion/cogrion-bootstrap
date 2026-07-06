@@ -92,6 +92,14 @@ The policies used by each addon are in [`iam/aws/`](iam/aws/). Review them befor
 | External Secrets | yes | `--no-external-secrets` |
 | AWS Load Balancer Controller | no | `--enable-alb-controller` |
 
+### Known issue: cplane-agent HPA and duplicate/aborted commands
+
+The `cplane-agent` chart's HPA (`autoscaling.enabled`, 1-3 replicas on CPU) is currently unsafe: every replica join force-fails in-flight commands claimed by *live sibling* replicas, not just ones orphaned by a real crash (`project-management#186`). Until that's fixed, disable it at bootstrap time:
+
+```bash
+--agent-set autoscaling.enabled=false
+```
+
 ## All options
 
 ```
@@ -101,6 +109,7 @@ The policies used by each addon are in [`iam/aws/`](iam/aws/). Review them befor
 --namespace            Kubernetes namespace for the agent (default: cogrion-system)
 --agent-version        cplane-agent Helm chart version
 --node-group-label     Value for nodeSelector.nodegroup on all Helm releases
+--agent-set            Extra --set override for the cplane-agent Helm release, KEY=VALUE (repeatable)
 --dry-run              Print actions without executing anything
 ```
 
