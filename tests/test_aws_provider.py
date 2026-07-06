@@ -785,9 +785,15 @@ def test_ensure_node_security_group_creates_with_correct_tags_and_rules(mocker):
     assert tags["kubernetes.io/cluster/my-cluster"] == "owned"
     assert tags["karpenter.sh/discovery"] == "my-cluster"
 
-    # 4 ingress rules: node self-all, cluster->node all, node->cluster 443, node->cluster ephemeral
+    # 3 ingress rules: node self-all, cluster->node all, node->cluster all.
+    # Both cross-SG directions must be all-traffic (not just kubelet ports)
+    # to match the symmetric trust a single shared node SG gets for free via
+    # self-reference in terraform-workspace-infra-aws — split into two SGs
+    # here, so both directions have to be granted explicitly. A node->cluster
+    # rule scoped to just tcp/443 + tcp/1025-65535 blocks pod-to-pod traffic
+    # that crosses the SG boundary (e.g. DNS to coredns on the cluster SG).
     calls = provider.ec2.authorize_security_group_ingress.call_args_list
-    assert len(calls) == 4
+    assert len(calls) == 3
 
     self_all = calls[0].kwargs
     assert self_all["GroupId"] == "sg-new"
@@ -801,26 +807,10 @@ def test_ensure_node_security_group_creates_with_correct_tags_and_rules(mocker):
         {"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": "sg-cluster"}]}
     ]
 
-    node_to_cluster_443 = calls[2].kwargs
-    assert node_to_cluster_443["GroupId"] == "sg-cluster"
-    assert node_to_cluster_443["IpPermissions"] == [
-        {
-            "IpProtocol": "tcp",
-            "FromPort": 443,
-            "ToPort": 443,
-            "UserIdGroupPairs": [{"GroupId": "sg-new"}],
-        }
-    ]
-
-    node_to_cluster_ephemeral = calls[3].kwargs
-    assert node_to_cluster_ephemeral["GroupId"] == "sg-cluster"
-    assert node_to_cluster_ephemeral["IpPermissions"] == [
-        {
-            "IpProtocol": "tcp",
-            "FromPort": 1025,
-            "ToPort": 65535,
-            "UserIdGroupPairs": [{"GroupId": "sg-new"}],
-        }
+    node_to_cluster = calls[2].kwargs
+    assert node_to_cluster["GroupId"] == "sg-cluster"
+    assert node_to_cluster["IpPermissions"] == [
+        {"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": "sg-new"}]}
     ]
 
 
