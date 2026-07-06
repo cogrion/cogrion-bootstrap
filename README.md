@@ -90,6 +90,7 @@ The policies used by each addon are in [`iam/aws/`](iam/aws/). Review them befor
 | AWS EFS CSI Driver | yes | `--no-efs-csi-driver` |
 | Metrics Server | yes | `--no-metrics-server` |
 | External Secrets | yes | `--no-external-secrets` |
+| Cluster Proportional Autoscaler (scales `coredns` with cluster size) | yes | `--no-cluster-proportional-autoscaler` |
 | AWS Load Balancer Controller | no | `--enable-alb-controller` |
 
 ### Known issue: cplane-agent HPA and duplicate/aborted commands

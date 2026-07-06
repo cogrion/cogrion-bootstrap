@@ -6,7 +6,7 @@ import subprocess
 import boto3
 from botocore.exceptions import ClientError
 
-from ..addons import HelmAddon, METRICS_SERVER, EXTERNAL_SECRETS
+from ..addons import HelmAddon, METRICS_SERVER, EXTERNAL_SECRETS, CLUSTER_PROPORTIONAL_AUTOSCALER
 from .base import BaseProvider
 
 _POLICY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "iam", "aws")
@@ -168,6 +168,7 @@ class AWSProvider(BaseProvider):
             METRICS_SERVER,
             alb_controller,
             external_secrets,
+            CLUSTER_PROPORTIONAL_AUTOSCALER,
         ]
 
     def ensure_iam(self) -> dict[str, str]:

@@ -362,6 +362,21 @@ def test_addons_returns_helm_addon_list(mocker):
     release_names = [a.release_name for a in addons]
     assert "aws-efs-csi-driver" in release_names
     assert "aws-load-balancer-controller" in release_names
+    assert "cluster-proportional-autoscaler" in release_names
+
+
+def test_addons_cluster_proportional_autoscaler_targets_coredns(mocker):
+    provider = _make_provider(mocker)
+
+    addons = provider.addons(irsa_arns={}, vpc_id="vpc-123")
+
+    cpa = next(a for a in addons if a.release_name == "cluster-proportional-autoscaler")
+    assert cpa.namespace == "kube-system"
+    assert cpa.set_args["options.target"] == "deployment/coredns"
+    # config.linear (or config.ladder) is required — the chart's ConfigMap
+    # template hard-fails without one.
+    assert "config.linear.min" in cpa.set_args
+    assert "config.linear.max" in cpa.set_args
 
 
 def test_addons_sets_alb_cluster_and_vpc(mocker):
