@@ -363,6 +363,7 @@ def test_main_aws_addon_disable_flags(mocker):
             "--no-efs-csi-driver",
             "--no-metrics-server",
             "--no-external-secrets",
+            "--no-cluster-proportional-autoscaler",
             "--dry-run",
         ],
     )

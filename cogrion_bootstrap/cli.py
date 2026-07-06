@@ -183,6 +183,9 @@ def main():
     addon_group.add_argument("--no-metrics-server", action="store_true", default=False)
     addon_group.add_argument("--no-alb-controller", action="store_true", default=False)
     addon_group.add_argument("--no-external-secrets", action="store_true", default=False)
+    addon_group.add_argument(
+        "--no-cluster-proportional-autoscaler", action="store_true", default=False
+    )
 
     args = parser.parse_args()
 
@@ -258,6 +261,8 @@ def main():
             skip.add("aws-load-balancer-controller")
         if args.no_external_secrets:
             skip.add("external-secrets")
+        if args.no_cluster_proportional_autoscaler:
+            skip.add("cluster-proportional-autoscaler")
 
         for name in skip:
             print(f"[cogrion-bootstrap] skipping {name} (disabled)")
