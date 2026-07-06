@@ -209,7 +209,7 @@ def main():
         )
 
         if args.create_node_group:
-            provider.ensure_cloud_resources(
+            node_security_group_id = provider.ensure_cloud_resources(
                 name=args.node_group_name,
                 instance_type=args.node_group_instance_type,
                 desired=args.node_group_desired,
@@ -218,6 +218,8 @@ def main():
                 subnets=args.node_group_subnets,
                 node_role_arn=args.node_role_arn,
             )
+            if node_security_group_id:
+                print(f"[aws] node_security_group_id: {node_security_group_id}")
 
         irsa_arns = {} if args.no_create_irsa else provider.ensure_iam()
 

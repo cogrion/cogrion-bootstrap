@@ -430,7 +430,7 @@ def test_ensure_launch_template_returns_existing(mocker):
         }
     )
 
-    lt_id, lt_ver = provider._ensure_launch_template("my-lt", 100, "gp3")
+    lt_id, lt_ver = provider._ensure_launch_template("my-lt", 100, "gp3", ["sg-node"])
 
     assert lt_id == "lt-existing"
     assert lt_ver == "3"
@@ -448,7 +448,7 @@ def test_ensure_launch_template_dry_run_returns_placeholder(mocker):
     )
     provider.ec2.describe_launch_templates = MagicMock(return_value={"LaunchTemplates": []})
 
-    lt_id, lt_ver = provider._ensure_launch_template("my-lt", 100, "gp3")
+    lt_id, lt_ver = provider._ensure_launch_template("my-lt", 100, "gp3", ["sg-node"])
 
     assert lt_id == "lt-00000000000000000"
     assert lt_ver == "1"
@@ -462,13 +462,14 @@ def test_ensure_launch_template_creates_with_imdsv2(mocker):
         return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-new", "DefaultVersionNumber": 1}}
     )
 
-    lt_id, lt_ver = provider._ensure_launch_template("my-lt", 50, "gp3")
+    lt_id, lt_ver = provider._ensure_launch_template("my-lt", 50, "gp3", ["sg-node"])
 
     assert lt_id == "lt-new"
     call_data = provider.ec2.create_launch_template.call_args.kwargs["LaunchTemplateData"]
     assert call_data["MetadataOptions"]["HttpTokens"] == "required"
     assert call_data["BlockDeviceMappings"][0]["Ebs"]["VolumeSize"] == 50
     assert call_data["BlockDeviceMappings"][0]["Ebs"]["Encrypted"] is True
+    assert call_data["SecurityGroupIds"] == ["sg-node"]
 
 
 def test_ensure_node_role_returns_existing(mocker):
@@ -671,6 +672,158 @@ def test_get_oidc_caches_result(mocker):
     assert arn1 == arn2
     assert url1 == url2
     provider.eks.describe_cluster.assert_called_once()  # cached on second call
+
+
+def test_get_cluster_network_info_caches_result(mocker):
+    provider = _make_provider(mocker)
+    provider.eks.describe_cluster = MagicMock(
+        return_value={
+            "cluster": {
+                "resourcesVpcConfig": {
+                    "vpcId": "vpc-abc",
+                    "clusterSecurityGroupId": "sg-cluster",
+                }
+            }
+        }
+    )
+
+    vpc1, sg1 = provider._get_cluster_network_info()
+    vpc2, sg2 = provider._get_cluster_network_info()
+
+    assert (vpc1, sg1) == ("vpc-abc", "sg-cluster")
+    assert (vpc2, sg2) == ("vpc-abc", "sg-cluster")
+    provider.eks.describe_cluster.assert_called_once()  # cached on second call
+
+
+def test_authorize_ingress_idempotent_swallows_duplicate_error(mocker):
+    provider = _make_provider(mocker)
+    from botocore.exceptions import ClientError
+
+    duplicate = ClientError(
+        {"Error": {"Code": "InvalidPermission.Duplicate", "Message": "already exists"}},
+        "AuthorizeSecurityGroupIngress",
+    )
+    provider.ec2.authorize_security_group_ingress = MagicMock(side_effect=duplicate)
+
+    # must not raise
+    provider._authorize_ingress_idempotent("sg-x", [{"IpProtocol": "-1"}])
+
+
+def test_authorize_ingress_idempotent_reraises_other_errors(mocker):
+    provider = _make_provider(mocker)
+    from botocore.exceptions import ClientError
+
+    other = ClientError(
+        {"Error": {"Code": "UnauthorizedOperation", "Message": "nope"}},
+        "AuthorizeSecurityGroupIngress",
+    )
+    provider.ec2.authorize_security_group_ingress = MagicMock(side_effect=other)
+
+    with pytest.raises(ClientError):
+        provider._authorize_ingress_idempotent("sg-x", [{"IpProtocol": "-1"}])
+
+
+def test_ensure_node_security_group_reuses_existing(mocker):
+    provider = _make_provider(mocker)
+    provider.ec2.describe_security_groups = MagicMock(
+        return_value={"SecurityGroups": [{"GroupId": "sg-existing"}]}
+    )
+
+    sg_id = provider._ensure_node_security_group("vpc-abc", "sg-cluster")
+
+    assert sg_id == "sg-existing"
+    provider.ec2.create_security_group.assert_not_called()
+
+
+def test_ensure_node_security_group_dry_run_returns_placeholder(mocker):
+    mocker.patch("cogrion_bootstrap.providers.aws.boto3.client", return_value=MagicMock())
+    provider = AWSProvider(
+        ext_account_id="111122223333",
+        ext_workspace_id="w-test01",
+        cluster_name="my-cluster",
+        region="ap-southeast-1",
+        dry_run=True,
+    )
+    provider.ec2.describe_security_groups = MagicMock(return_value={"SecurityGroups": []})
+
+    sg_id = provider._ensure_node_security_group("vpc-abc", "sg-cluster")
+
+    assert sg_id == "sg-00000000000000000"
+    provider.ec2.create_security_group.assert_not_called()
+
+
+def test_ensure_node_security_group_creates_with_correct_tags_and_rules(mocker):
+    provider = _make_provider(mocker)
+    provider.ec2.describe_security_groups = MagicMock(return_value={"SecurityGroups": []})
+    provider.ec2.create_security_group = MagicMock(return_value={"GroupId": "sg-new"})
+    provider.ec2.authorize_security_group_ingress = MagicMock()
+
+    sg_id = provider._ensure_node_security_group("vpc-abc", "sg-cluster")
+
+    assert sg_id == "sg-new"
+
+    create_kwargs = provider.ec2.create_security_group.call_args.kwargs
+    assert create_kwargs["GroupName"] == "my-cluster-node"
+    assert create_kwargs["VpcId"] == "vpc-abc"
+    tags = {t["Key"]: t["Value"] for t in create_kwargs["TagSpecifications"][0]["Tags"]}
+    assert tags["Name"] == "my-cluster-node"
+    assert tags["kubernetes.io/cluster/my-cluster"] == "owned"
+    assert tags["karpenter.sh/discovery"] == "my-cluster"
+
+    # 4 ingress rules: node self-all, cluster->node all, node->cluster 443, node->cluster ephemeral
+    calls = provider.ec2.authorize_security_group_ingress.call_args_list
+    assert len(calls) == 4
+
+    self_all = calls[0].kwargs
+    assert self_all["GroupId"] == "sg-new"
+    assert self_all["IpPermissions"] == [
+        {"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": "sg-new"}]}
+    ]
+
+    cluster_to_node = calls[1].kwargs
+    assert cluster_to_node["GroupId"] == "sg-new"
+    assert cluster_to_node["IpPermissions"] == [
+        {"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": "sg-cluster"}]}
+    ]
+
+    node_to_cluster_443 = calls[2].kwargs
+    assert node_to_cluster_443["GroupId"] == "sg-cluster"
+    assert node_to_cluster_443["IpPermissions"] == [
+        {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "UserIdGroupPairs": [{"GroupId": "sg-new"}],
+        }
+    ]
+
+    node_to_cluster_ephemeral = calls[3].kwargs
+    assert node_to_cluster_ephemeral["GroupId"] == "sg-cluster"
+    assert node_to_cluster_ephemeral["IpPermissions"] == [
+        {
+            "IpProtocol": "tcp",
+            "FromPort": 1025,
+            "ToPort": 65535,
+            "UserIdGroupPairs": [{"GroupId": "sg-new"}],
+        }
+    ]
+
+
+def test_ensure_cloud_resources_wires_node_security_group_into_launch_template(mocker):
+    provider = _make_provider(mocker)
+    provider._get_cluster_network_info = MagicMock(return_value=("vpc-abc", "sg-cluster"))
+    provider._ensure_node_security_group = MagicMock(return_value="sg-node")
+    provider._node_group_status = MagicMock(return_value="")
+    provider._discover_eks_subnets = MagicMock(return_value=["subnet-aaa"])
+    provider._ensure_node_role = MagicMock(return_value="arn:aws:iam::123:role/node-role")
+    provider._ensure_launch_template = MagicMock(return_value=("lt-abc123", "1"))
+    provider.eks.get_waiter = MagicMock(return_value=MagicMock())
+
+    node_sg_id = provider.ensure_cloud_resources(name="system", subnets="")
+
+    assert node_sg_id == "sg-node"
+    provider._ensure_launch_template.assert_called_once()
+    assert provider._ensure_launch_template.call_args.kwargs["security_group_ids"] == ["sg-node"]
 
 
 def test_node_group_delete_and_retry_on_create_failed(mocker):

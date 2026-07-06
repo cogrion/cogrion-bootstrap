@@ -4,6 +4,7 @@ import re
 import subprocess
 
 import boto3
+from botocore.exceptions import ClientError
 
 from ..addons import HelmAddon, METRICS_SERVER, EXTERNAL_SECRETS
 from .base import BaseProvider
@@ -79,6 +80,8 @@ class AWSProvider(BaseProvider):
         self._cached_oidc_arn: str = ""
         self._cached_oidc_url: str = ""
         self._cached_account_id: str = ""
+        self._cached_vpc_id: str = ""
+        self._cached_cluster_sg_id: str = ""
 
     def addons(self, irsa_arns: dict[str, str], vpc_id: str = "") -> list:
         def _arn(key: str) -> str:
@@ -211,13 +214,17 @@ class AWSProvider(BaseProvider):
         stateful: bool = False,
         disk_size: int = 100,
         disk_type: str = "gp3",
-    ) -> None:
+    ) -> str | None:
+        """Returns the shared node security group ID, or None in dry-run mode."""
+        vpc_id, cluster_sg_id = self._get_cluster_network_info()
+        node_sg_id = self._ensure_node_security_group(vpc_id, cluster_sg_id)
+
         status = self._node_group_status(name)
         print(f"[aws] node group '{name}' status: {status or 'not found'}")
 
         if status == "ACTIVE":
             print(f"[aws] node group '{name}' already active — skipping")
-            return
+            return node_sg_id
 
         if status == "CREATE_FAILED":
             print(f"[aws] node group '{name}' in CREATE_FAILED — deleting before retry")
@@ -243,12 +250,13 @@ class AWSProvider(BaseProvider):
 
         if self.dry_run:
             print(f"[aws] dry-run: skipping node group creation")
-            return
+            return None
 
         lt_id, lt_version = self._ensure_launch_template(
             name=f"{self.cluster_name}-{name}",
             disk_size=disk_size,
             disk_type=disk_type,
+            security_group_ids=[node_sg_id],
         )
 
         self.eks.create_nodegroup(
@@ -272,6 +280,7 @@ class AWSProvider(BaseProvider):
             clusterName=self.cluster_name, nodegroupName=name
         )
         print(f"[aws] node group '{name}' is active")
+        return node_sg_id
 
     def ensure_node_group(
         self,
@@ -284,8 +293,8 @@ class AWSProvider(BaseProvider):
         node_role_arn,
         stateful: bool = False,
         disk_size: int = 100,
-    ):
-        self.ensure_cloud_resources(
+    ) -> str | None:
+        return self.ensure_cloud_resources(
             name=name,
             instance_type=instance_type,
             desired=desired,
@@ -393,6 +402,108 @@ class AWSProvider(BaseProvider):
         self._cached_oidc_arn = arn
         self._cached_oidc_url = oidc_url
         return arn, oidc_url
+
+    def _get_cluster_network_info(self) -> tuple[str, str]:
+        """Return (vpc_id, cluster_security_group_id) for the cluster."""
+        if self._cached_vpc_id:
+            return self._cached_vpc_id, self._cached_cluster_sg_id
+
+        cluster = self.eks.describe_cluster(name=self.cluster_name)["cluster"]
+        vpc_config = cluster["resourcesVpcConfig"]
+
+        self._cached_vpc_id = vpc_config["vpcId"]
+        self._cached_cluster_sg_id = vpc_config["clusterSecurityGroupId"]
+        return self._cached_vpc_id, self._cached_cluster_sg_id
+
+    def _authorize_ingress_idempotent(self, group_id: str, ip_permissions: list[dict]) -> None:
+        """authorize_security_group_ingress, treating an already-present rule as success."""
+        try:
+            self.ec2.authorize_security_group_ingress(
+                GroupId=group_id, IpPermissions=ip_permissions
+            )
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "InvalidPermission.Duplicate":
+                raise
+            print(f"[aws] ingress rule already present on {group_id} — skipping")
+
+    def _ensure_node_security_group(self, vpc_id: str, cluster_sg_id: str) -> str:
+        """Idempotently create the shared node security group and the minimum
+        cross-SG rules required for EKS managed node groups that use a
+        distinct security group from the cluster's own — mirrors
+        terraform-workspace-infra-aws/modules/workspace-cluster/eks.tf's
+        node_security_group_additional_rules / security_group_additional_rules
+        (self all-traffic, cluster<->node all-traffic, node ephemeral ports).
+        """
+        name = f"{self.cluster_name}-node"
+        resp = self.ec2.describe_security_groups(
+            Filters=[
+                {"Name": "vpc-id", "Values": [vpc_id]},
+                {"Name": "group-name", "Values": [name]},
+            ]
+        )
+        if resp["SecurityGroups"]:
+            sg_id = resp["SecurityGroups"][0]["GroupId"]
+            print(f"[aws] node security group '{name}' exists — reusing {sg_id}")
+            return sg_id
+
+        print(f"[aws] creating node security group '{name}'")
+        if self.dry_run:
+            print(f"[aws] dry-run: skipping node security group creation")
+            return f"sg-00000000000000000"
+
+        sg_id = self.ec2.create_security_group(
+            GroupName=name,
+            Description=f"Shared node security group for {self.cluster_name}",
+            VpcId=vpc_id,
+            TagSpecifications=[
+                {
+                    "ResourceType": "security-group",
+                    "Tags": [
+                        {"Key": "Name", "Value": name},
+                        {"Key": f"kubernetes.io/cluster/{self.cluster_name}", "Value": "owned"},
+                        {"Key": "karpenter.sh/discovery", "Value": self.cluster_name},
+                    ],
+                }
+            ],
+        )["GroupId"]
+
+        # ingress_self_all — node to node, all ports/protocols
+        self._authorize_ingress_idempotent(
+            sg_id, [{"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": sg_id}]}]
+        )
+        # ingress_cluster_to_node_all_traffic — cluster API to nodegroup, all ports/protocols
+        self._authorize_ingress_idempotent(
+            sg_id, [{"IpProtocol": "-1", "UserIdGroupPairs": [{"GroupId": cluster_sg_id}]}]
+        )
+        # node -> control-plane API (kubelet). Not always present by default on a
+        # plain EKS-auto-created cluster SG (only self-referencing), unlike a
+        # terraform-aws-modules/eks-managed cluster SG which already has this.
+        self._authorize_ingress_idempotent(
+            cluster_sg_id,
+            [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 443,
+                    "ToPort": 443,
+                    "UserIdGroupPairs": [{"GroupId": sg_id}],
+                }
+            ],
+        )
+        # ingress_nodes_ephemeral_ports_tcp — nodes on ephemeral ports, into the cluster SG
+        self._authorize_ingress_idempotent(
+            cluster_sg_id,
+            [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 1025,
+                    "ToPort": 65535,
+                    "UserIdGroupPairs": [{"GroupId": sg_id}],
+                }
+            ],
+        )
+
+        print(f"[aws] node security group '{name}' created: {sg_id}")
+        return sg_id
 
     def _ensure_irsa_role(
         self,
@@ -560,7 +671,9 @@ class AWSProvider(BaseProvider):
             "Pass --node-group-subnets explicitly."
         )
 
-    def _ensure_launch_template(self, name: str, disk_size: int, disk_type: str) -> tuple[str, str]:
+    def _ensure_launch_template(
+        self, name: str, disk_size: int, disk_type: str, security_group_ids: list[str]
+    ) -> tuple[str, str]:
         resp = self.ec2.describe_launch_templates(
             Filters=[{"Name": "launch-template-name", "Values": [name]}]
         )
@@ -596,6 +709,7 @@ class AWSProvider(BaseProvider):
                         },
                     }
                 ],
+                "SecurityGroupIds": security_group_ids,
             },
         )
         lt = resp["LaunchTemplate"]
