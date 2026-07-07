@@ -12,8 +12,10 @@ Work through the sections in order — later sections (IAM roles, storage classe
 
 ---
 
-Account ID: e4pae6y8m8h  - "Unique to the customer, used to login to their realm"
-Platform ID: w-h8v7gwfbw    - "Unique workspace id for each workspace"
+| Field | Value | Description |
+|---|---|---|
+| Account ID | `e4pae6y8m8h` | Unique to the customer, used to login to their realm |
+| Platform ID | `w-h8v7gwfbw` | Unique workspace id for each workspace |
 
 ## 1. Networking
 
