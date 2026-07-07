@@ -12,6 +12,9 @@ Work through the sections in order — later sections (IAM roles, storage classe
 
 ---
 
+Account ID: e4pae6y8m8h  - "Unique to the customer, used to login to their realm"
+Platform ID: w-h8v7gwfbw    - "Unique workspace id for each workspace"
+
 ## 1. Networking
 
 ### 1.1 VPC
@@ -52,7 +55,7 @@ Every bucket a component would otherwise create for itself must be pre-created b
 | `{platform_id}-workspace` | JupyterHub, Workspace File Management, QuantData BFF, Superset, Delta-Spark, ML Platform | Retain | Shared user workspace storage |
 | `{platform_id}-log-archive` | Fluent Bit | Retain | Long-term audit log archival |
 | `{platform_id}-airflow-logs` | Airflow | Retain | Task and scheduler remote logging |
-| `qd-platform-{ext_workspace_id}-cubestore` | Cube | Retain | CubeStore pre-aggregation cache |
+| `qd-platform-{platform_id}-cubestore` | Cube | Retain | CubeStore pre-aggregation cache |
 | `{platform_id}-openbao-snapshots` | OpenBao | Retain | Raft snapshot backups |
 | `{platform_id}-spark-event-logs` | Spark Operator, Spark History Server | Retain | Spark driver/executor event logs (shared by both) |
 | `{platform_id}-superset-async-results` | Superset | Retain | Async query result cache |
@@ -62,7 +65,7 @@ Every bucket a component would otherwise create for itself must be pre-created b
 | `{platform_id}-loki-chunks` | Observability (Loki) | Retain | Log chunks (log content) |
 | `{platform_id}-loki-ruler` | Observability (Loki) | Retain | Ruler state (alerting rules) |
 | `{platform_id}-velero-backup` | Velero | Safe to delete | Cluster backup storage — the only bucket Cogrion's own automation would otherwise delete on stack removal |
-| `qd-platform-{workspace_id}-kb-backup` | KubeBlocks | Retain | Database backup storage |
+| `qd-platform-{platform_id}-kb-backup` | KubeBlocks | Retain | Database backup storage |
 
 **Hand back to Cogrion:** confirmation that each bucket relevant to your deployment exists.
 
