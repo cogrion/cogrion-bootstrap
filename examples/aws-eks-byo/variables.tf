@@ -1,0 +1,129 @@
+# --- Shared ------------------------------------------------------------
+variable "region" {
+  description = "AWS region to provision into"
+  type        = string
+}
+
+variable "tags" {
+  description = "Additional freeform tags, merged with the required Cogrion identifiers below into local.tags"
+  type        = map(string)
+  default     = {}
+}
+
+# Required so Cogrion can match this infrastructure back to the right
+# workspace when adopted via byo* fields — first-class variables instead of
+# freeform tags map entries so they can't be typo'd or forgotten.
+variable "cogrion_account_id" {
+  description = "Cogrion account identifier this infrastructure belongs to"
+  type        = string
+}
+
+variable "cogrion_workspace_id" {
+  description = "Cogrion workspace identifier this infrastructure belongs to"
+  type        = string
+}
+
+# --- Dual-mode provider auth ---------------------------------------------
+# Leave assume_role_arn empty for self-deploy mode (your own default
+# credentials). Set it for assume-role mode (Cogrion's own automation
+# assuming into your account) — session_name/external_id are only used then.
+variable "assume_role_arn" {
+  description = "IAM role ARN to assume. Empty = use default credentials directly (self-deploy mode)."
+  type        = string
+  default     = ""
+}
+
+variable "assume_role_session_name" {
+  description = "Session name for the assumed role. Only used when assume_role_arn is set."
+  type        = string
+  default     = "terraform-access"
+}
+
+variable "assume_role_external_id" {
+  description = "External ID for the assumed role, if your trust policy requires one. Only used when assume_role_arn is set."
+  type        = string
+  default     = ""
+}
+
+# --- VPC -----------------------------------------------------------------
+variable "az_count" {
+  description = "Count of availability zones"
+  type        = number
+  default     = 2
+}
+
+variable "vpc_name" {
+  description = "VPC name"
+  type        = string
+}
+
+variable "vpc_cidr" {
+  description = "VPC CIDR"
+  type        = string
+}
+
+# Routable public subnets with NAT Gateway and Internet Gateway. Not required
+# for fully private clusters.
+variable "public_subnets" {
+  description = "Public subnet CIDRs. ~124 IPs per subnet/AZ."
+  type        = list(string)
+}
+
+# Routable private subnets, for Private NAT Gateway -> Transit Gateway ->
+# second VPC for overlapping CIDRs.
+variable "private_subnets" {
+  description = "Private subnet CIDRs. ~252 IPs per subnet/AZ, for Private NAT + NLB + EKS nodes + EC2 jumphost etc."
+  type        = list(string)
+}
+
+variable "db_private_subnets" {
+  description = "Private subnet CIDRs for database services. ~252 IPs per subnet/AZ."
+  type        = list(string)
+}
+
+# RFC6598 range 100.64.0.0/10 — not publicly routable. Only one /16 (or
+# multiples of /16) can be attached to a VPC as a secondary CIDR block.
+variable "secondary_cidr_blocks" {
+  description = "Secondary CIDR blocks to attach to the VPC"
+  type        = list(string)
+  default     = ["100.64.0.0/16"]
+}
+
+# EKS worker nodes and pods are placed on these subnets. Each gets 32766 IPs.
+variable "eks_data_plane_subnet_secondary_cidr" {
+  description = "Secondary CIDR blocks for EKS node/pod IPs, ~32766 IPs per subnet/AZ"
+  type        = list(string)
+  default     = ["100.64.0.0/17", "100.64.128.0/17"]
+}
+
+# --- EKS cluster -----------------------------------------------------------
+variable "eks_kubernetes_version" {
+  description = "EKS control plane Kubernetes version"
+  type        = string
+  default     = "1.36"
+}
+
+variable "eks_cluster_endpoint_public_access" {
+  description = "Whether the EKS API server endpoint is publicly reachable. Fine for a sandbox; set false for preprod/prod once you've confirmed private access works."
+  type        = bool
+  default     = true
+}
+
+variable "kms_key_admin_roles" {
+  description = "Additional IAM role ARNs to grant admin on the EKS cluster's KMS key, beyond the account root and current caller"
+  type        = list(string)
+  default     = []
+}
+
+variable "eks_blueprints_addons" {
+  description = <<-EOT
+    Arbitrary config passed to module "eks_blueprints_addons" (aws-ia/eks-blueprints-addons/aws).
+    Accepts any attribute that module supports. For aws_load_balancer_controller,
+    vpcId is injected automatically — add extra `set` entries under
+    aws_load_balancer_controller.set instead of overriding it wholesale.
+    external-dns and cert-manager are intentionally not managed here — see
+    the Cloudflare webhook-proxy pattern / KCL stacks instead.
+  EOT
+  type        = any
+  default     = {}
+}
