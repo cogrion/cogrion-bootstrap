@@ -283,8 +283,8 @@ module "eks_blueprints_addons" {
     }
   )
 
-  # external-dns and cert-manager intentionally excluded — managed via KCL
-  # stacks / the Cloudflare webhook-proxy pattern instead, not here.
+  # Traefik and external-dns are managed in helm-addons.tf (standalone helm_release),
+  # not here. cert-manager is not used — see kubeblocks-irsa.tf comment.
 
   enable_karpenter = false
 

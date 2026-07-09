@@ -1,5 +1,7 @@
 import json
 import subprocess
+import tempfile
+import os
 
 
 def is_externally_managed(kind: str, name: str, namespace: str) -> bool:
@@ -69,6 +71,7 @@ def helm_apply(
     chart: str,
     version: str | None = None,
     set_args: dict | None = None,
+    values_yaml: str = "",
     dry_run: bool = False,
 ) -> None:
     status = _helm_status(release, namespace)
@@ -104,13 +107,24 @@ def helm_apply(
         if value:
             cmd += ["--set", f"{key}={value}"]
 
+    tmp_values = None
+    if values_yaml:
+        tmp_values = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        tmp_values.write(values_yaml)
+        tmp_values.flush()
+        cmd += ["--values", tmp_values.name]
+
     print(f"[helm] running: {' '.join(cmd)}")
 
     if dry_run:
+        if tmp_values:
+            os.unlink(tmp_values.name)
         print(f"[helm] dry-run: skipping execution")
         return
 
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if tmp_values:
+        os.unlink(tmp_values.name)
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if (

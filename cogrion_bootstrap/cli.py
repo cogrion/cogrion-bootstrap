@@ -10,7 +10,19 @@ from .constants import (
 )
 from .register import register_agent
 from .helm import helm_apply, ensure_helm_repos, is_externally_managed
-from .addons import HelmAddon, KubectlAddon, helm_repos_for
+from .addons import (
+    HelmAddon,
+    KubectlAddon,
+    METRICS_SERVER,
+    EXTERNAL_SECRETS,
+    CLUSTER_PROPORTIONAL_AUTOSCALER,
+    TRAEFIK_VERSION,
+    TRAEFIK_NAMESPACE,
+    DNS_WEBHOOK_VERSION,
+    make_traefik,
+    make_external_dns,
+    helm_repos_for,
+)
 
 
 def _ecr_login(region: str, dry_run: bool = False) -> None:
@@ -64,10 +76,125 @@ def _install_addons(addons: list, node_selector_set: dict, dry_run: bool) -> Non
                 chart=addon.chart,
                 version=addon.version,
                 set_args={**addon.set_args, **node_selector_set},
+                values_yaml=addon.values_yaml,
                 dry_run=dry_run,
             )
         elif isinstance(addon, KubectlAddon):
             _kubectl_apply(addon.manifest_url, dry_run=dry_run)
+
+
+def _print_plan(
+    args: any, node_group_label: str, addons_to_install: list[tuple[str, str, str]]
+) -> None:
+    print()
+    print("=" * 60)
+    print("  Cogrion Bootstrap Plan")
+    print("=" * 60)
+    print(f"  Provider        : {args.provider}")
+    if args.provider == "aws":
+        print(f"  Cluster         : {args.cluster_name}  ({args.region})")
+        print(f"  Control plane   : {args.control_plane_url}")
+        print()
+        print("  Node group")
+        if args.create_node_group:
+            print(f"    Create        : {args.node_group_name}")
+            print(f"    Instance type : {args.node_group_instance_type}")
+            print(
+                f"    Desired / min / max : {args.node_group_desired} / {args.node_group_min} / {args.node_group_max}"
+            )
+        else:
+            print(f"    Use existing  : {args.node_group_name}")
+        print(f"    nodegroup label (nodeSelector.nodegroup): {node_group_label}")
+        print()
+        print("  IRSA roles      :", "skip (--no-create-irsa)" if args.no_create_irsa else "create")
+        print()
+        # Collect all namespaces that will be created (deduplicated, ordered)
+        namespaces = dict.fromkeys(
+            [args.namespace] + [ns for _, _, ns in addons_to_install if ns != "kube-system"]
+        )
+        print("  Namespaces to ensure:")
+        for ns in namespaces:
+            print(f"    - {ns}")
+        print()
+        if addons_to_install:
+            print("  Addons to install:")
+            for name, version, namespace in addons_to_install:
+                ver_str = f"  ({version})" if version else ""
+                print(f"    - {name}{ver_str}  [{namespace}]")
+        else:
+            print("  Addons to install : (none)")
+        print()
+        print(f"  cplane-agent Helm chart  : {args.agent_version}")
+        print(f"  Agent namespace          : {args.namespace}")
+        if args.tofu_backend_bucket:
+            print(f"  Tofu state bucket        : {args.tofu_backend_bucket}")
+    print("=" * 60)
+    print()
+
+
+def _copy_secret_to_namespace(
+    secret_name: str, src_namespace: str, dst_namespace: str, dry_run: bool = False
+) -> None:
+    if dry_run:
+        print(
+            f"[kubectl] dry-run: copy secret {secret_name} from {src_namespace} to {dst_namespace}"
+        )
+        return
+    # ensure destination namespace exists
+    ns_result = subprocess.run(
+        ["kubectl", "create", "namespace", dst_namespace, "--dry-run=client", "-o", "yaml"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=ns_result.stdout, check=True)
+
+    get = subprocess.run(
+        ["kubectl", "get", "secret", secret_name, "-n", src_namespace, "-o", "json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    import json as _json
+
+    secret = _json.loads(get.stdout)
+    secret["metadata"] = {
+        "name": secret_name,
+        "namespace": dst_namespace,
+    }
+    apply = subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=_json.dumps(secret),
+        text=True,
+        capture_output=True,
+    )
+    if apply.returncode != 0:
+        raise RuntimeError(
+            f"[kubectl] failed to copy secret {secret_name} to {dst_namespace}:\n{apply.stderr.strip()}"
+        )
+    print(f"[kubectl] secret {secret_name} copied to namespace {dst_namespace}")
+
+
+def _ensure_cogrion_system_namespace(cogrion_system_namespace: str, dry_run: bool = False) -> None:
+    if dry_run:
+        print(
+            f"[kubectl] dry-run: kubectl create namespace {cogrion_system_namespace} --dry-run=client"
+        )
+        return
+    result = subprocess.run(
+        [
+            "kubectl",
+            "create",
+            "namespace",
+            cogrion_system_namespace,
+            "--dry-run=client",
+            "-o",
+            "yaml",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=result.stdout, check=True)
+    print(f"[kubectl] namespace {cogrion_system_namespace} ensured")
 
 
 def _parse_set_args(pairs: list[str]) -> dict[str, str]:
@@ -111,8 +238,12 @@ def main():
     )
     parser.add_argument(
         "--node-group-label",
-        default="",
-        help="Value for nodeSelector.nodegroup on all Helm releases",
+        default=None,
+        help="Value of the 'nodegroup' k8s node label on the system node group "
+        "(applied as nodeSelector.nodegroup to all Helm releases). "
+        "Defaults to --node-group-name when --create-node-group is set (the label "
+        "is set to that value on creation). Required when --no-create-node-group is "
+        "used — check the actual label with: kubectl get nodes --show-labels | grep nodegroup",
     )
     parser.add_argument(
         "--agent-set",
@@ -137,7 +268,13 @@ def main():
         help="Create a managed node group (default: true)",
     )
     aws.add_argument("--no-create-node-group", dest="create_node_group", action="store_false")
-    aws.add_argument("--node-group-name", default="system")
+    aws.add_argument(
+        "--node-group-name",
+        default="system",
+        help="EKS managed node group name to create (default: system). "
+        "Required when --no-create-node-group is set so the existing node group "
+        "can be located.",
+    )
     aws.add_argument("--node-group-instance-type", default="t3.medium")
     aws.add_argument("--node-group-desired", type=int, default=2)
     aws.add_argument("--node-group-min", type=int, default=1)
@@ -183,6 +320,22 @@ def main():
     addon_group.add_argument("--no-metrics-server", action="store_true", default=False)
     addon_group.add_argument("--no-alb-controller", action="store_true", default=False)
     addon_group.add_argument("--no-external-secrets", action="store_true", default=False)
+    addon_group.add_argument("--no-traefik", action="store_true", default=False)
+    addon_group.add_argument(
+        "--traefik-subnets",
+        default=None,
+        help=(
+            "Comma-separated public subnet IDs for the Traefik NLB "
+            "(e.g. subnet-aaa,subnet-bbb). Required unless --no-traefik. "
+            "Get them from: tofu output public_subnets, or aws ec2 describe-subnets."
+        ),
+    )
+    addon_group.add_argument("--no-external-dns", action="store_true", default=False)
+    addon_group.add_argument(
+        "--dns-webhook-tag",
+        default=DNS_WEBHOOK_VERSION,
+        help="Image tag for the dns-webhook external-dns sidecar",
+    )
     addon_group.add_argument(
         "--no-cluster-proportional-autoscaler", action="store_true", default=False
     )
@@ -199,15 +352,73 @@ def main():
             parser.error("--region is required for --provider aws")
         if args.enable_alb_controller and not args.vpc_id:
             parser.error("--vpc-id is required when --enable-alb-controller is set")
+        if not args.create_node_group and not args.node_group_label:
+            parser.error(
+                "--node-group-label is required when --no-create-node-group is set "
+                "(the nodegroup label on an existing node group cannot be inferred — "
+                "check with: kubectl get nodes --show-labels | grep nodegroup)"
+            )
+        if not args.no_traefik and not args.traefik_subnets:
+            parser.error(
+                "--traefik-subnets is required (comma-separated public subnet IDs for the Traefik NLB). "
+                "Get them with: tofu output public_subnets  or  "
+                "aws ec2 describe-subnets --filters Name=tag:kubernetes.io/role/elb,Values=1 "
+                "--query 'Subnets[].SubnetId' --output text"
+            )
 
     dry = args.dry_run
-    print(
-        f"[cogrion-bootstrap] provider={args.provider} cluster={getattr(args, 'cluster_name', '')} dry_run={dry}"
-    )
 
-    node_selector_set = (
-        {"nodeSelector.nodegroup": args.node_group_label} if args.node_group_label else {}
-    )
+    # When we create the node group we set labels={"nodegroup": node_group_name},
+    # so the label value safely defaults to the name. For existing node groups the
+    # label is unknown — validated above that --node-group-label is explicit.
+    node_group_label: str = args.node_group_label or args.node_group_name
+
+    # (release_name, chart_version, namespace) — versions must stay in sync with providers/aws.py
+    _KNOWN_ADDONS: list[tuple[str, str, str]] = [
+        ("cluster-autoscaler", "9.57.0", "kube-system"),
+        ("aws-efs-csi-driver", "4.3.0", "kube-system"),
+        (METRICS_SERVER.release_name, METRICS_SERVER.version, METRICS_SERVER.namespace),
+        ("aws-load-balancer-controller", "", "kube-system"),
+        (EXTERNAL_SECRETS.release_name, EXTERNAL_SECRETS.version, EXTERNAL_SECRETS.namespace),
+        ("traefik", TRAEFIK_VERSION, TRAEFIK_NAMESPACE),
+        ("external-dns", make_external_dns("").version, make_external_dns("").namespace),
+        (
+            CLUSTER_PROPORTIONAL_AUTOSCALER.release_name,
+            CLUSTER_PROPORTIONAL_AUTOSCALER.version,
+            CLUSTER_PROPORTIONAL_AUTOSCALER.namespace,
+        ),
+    ]
+    skip_for_plan: set[str] = set()
+    if args.provider == "aws":
+        if args.no_cluster_autoscaler:
+            skip_for_plan.add("cluster-autoscaler")
+        if args.no_efs_csi_driver:
+            skip_for_plan.add("aws-efs-csi-driver")
+        if args.no_metrics_server:
+            skip_for_plan.add("metrics-server")
+        if not args.enable_alb_controller or args.no_alb_controller:
+            skip_for_plan.add("aws-load-balancer-controller")
+        if args.no_external_secrets:
+            skip_for_plan.add("external-secrets")
+        if args.no_traefik:
+            skip_for_plan.add("traefik")
+        if args.no_external_dns:
+            skip_for_plan.add("external-dns")
+        if args.no_cluster_proportional_autoscaler:
+            skip_for_plan.add("cluster-proportional-autoscaler")
+    addons_to_install = [(n, v, ns) for n, v, ns in _KNOWN_ADDONS if n not in skip_for_plan]
+
+    _print_plan(args, node_group_label, addons_to_install)
+
+    print("  Only 'yes' will be accepted to approve.")
+    print()
+    answer = input("  Enter a value: ").strip()
+    if answer != "yes":
+        print()
+        print("Error: Bootstrap cancelled.")
+        sys.exit(1)
+
+    node_selector_set = {"nodeSelector.nodegroup": node_group_label}
 
     irsa_arns: dict = {}
 
@@ -241,32 +452,32 @@ def main():
             )
             if node_security_group_id:
                 print(f"[aws] node_security_group_id: {node_security_group_id}")
-
-        irsa_arns = {} if args.no_create_irsa else provider.ensure_iam()
+        irsa_arns = {} if (args.no_create_irsa or dry) else provider.ensure_iam()
 
         addons = provider.addons(
             irsa_arns=irsa_arns,
             vpc_id=args.vpc_id,
+            traefik_subnets=args.traefik_subnets or "",
         )
+        # external-dns is not cloud-specific — assembled here rather than in
+        # the provider, unlike traefik (whose NLB subnet annotation is AWS-only).
+        addons.append(make_external_dns(args.control_plane_url, webhook_tag=args.dns_webhook_tag))
 
-        # Filter out disabled addons
-        skip = set()
-        if args.no_cluster_autoscaler:
-            skip.add("cluster-autoscaler")
-        if args.no_efs_csi_driver:
-            skip.add("aws-efs-csi-driver")
-        if args.no_metrics_server:
-            skip.add("metrics-server")
-        if not args.enable_alb_controller or args.no_alb_controller:
-            skip.add("aws-load-balancer-controller")
-        if args.no_external_secrets:
-            skip.add("external-secrets")
-        if args.no_cluster_proportional_autoscaler:
-            skip.add("cluster-proportional-autoscaler")
-
-        for name in skip:
+        for name in skip_for_plan:
             print(f"[cogrion-bootstrap] skipping {name} (disabled)")
-        addons = [a for a in addons if a.release_name not in skip]
+        addons = [a for a in addons if a.release_name not in skip_for_plan]
+
+        # Copy the mTLS secret into external-dns's namespace (creating the
+        # namespace if needed) before installing/detecting external-dns —
+        # the webhook sidecar reads it at container start, so it must exist
+        # first, whether this run or Terraform owns the Helm release.
+        if "external-dns" not in skip_for_plan:
+            _copy_secret_to_namespace(
+                secret_name="cluster-agent-credentials",
+                src_namespace=args.namespace,
+                dst_namespace="external-dns",
+                dry_run=dry,
+            )
 
         _install_addons(addons, node_selector_set, dry)
 
@@ -283,6 +494,8 @@ def main():
             tofu_set["tofu.backendKeyPrefix"] = args.tofu_backend_key_prefix
 
     agent_set = _parse_set_args(args.agent_set)
+
+    _ensure_cogrion_system_namespace(args.namespace, dry_run=dry)
 
     helm_apply(
         release="cplane-agent",
