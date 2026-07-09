@@ -134,14 +134,19 @@ resource "kubernetes_config_map_v1" "bootstrap_script" {
 }
 
 # ---------------------------------------------------------------------------
-# Trigger — recreates the Job when token or agent version changes
+# Trigger — recreates the Job when any of its env inputs change. The Job's
+# pod template is immutable at the k8s API level, so Terraform can't just
+# patch it in place; this forces a replace via replace_triggered_by below.
 # ---------------------------------------------------------------------------
 resource "terraform_data" "bootstrap_trigger" {
   count = local.bootstrap_enabled ? 1 : 0
   input = {
-    token         = var.bootstrap_token
-    agent_version = var.agent_version
-    checksum      = local.bootstrap_script_checksum
+    token               = var.bootstrap_token
+    agent_version       = var.agent_version
+    checksum            = local.bootstrap_script_checksum
+    tofu_backend_bucket = var.tofu_backend_bucket
+    enable_external_dns = var.enable_external_dns
+    dns_webhook_tag     = var.dns_webhook_image_tag
   }
 }
 

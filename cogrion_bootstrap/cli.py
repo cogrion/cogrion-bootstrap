@@ -256,6 +256,12 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Print actions without executing anything"
     )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Skip the interactive 'yes' confirmation prompt (for unattended/CI runs, "
+        "e.g. the bootstrap Kubernetes Job, which has no stdin to read from)",
+    )
 
     # AWS
     aws = parser.add_argument_group("AWS")
@@ -410,13 +416,16 @@ def main():
 
     _print_plan(args, node_group_label, addons_to_install)
 
-    print("  Only 'yes' will be accepted to approve.")
-    print()
-    answer = input("  Enter a value: ").strip()
-    if answer != "yes":
+    if args.auto_approve:
+        print("  --auto-approve set — skipping confirmation.")
+    else:
+        print("  Only 'yes' will be accepted to approve.")
         print()
-        print("Error: Bootstrap cancelled.")
-        sys.exit(1)
+        answer = input("  Enter a value: ").strip()
+        if answer != "yes":
+            print()
+            print("Error: Bootstrap cancelled.")
+            sys.exit(1)
 
     node_selector_set = {"nodeSelector.nodegroup": node_group_label}
 
