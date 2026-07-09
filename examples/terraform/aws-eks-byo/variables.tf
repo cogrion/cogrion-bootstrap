@@ -134,15 +134,34 @@ variable "enable_traefik" {
 }
 
 variable "enable_external_dns" {
-  description = "Install external-dns with the Cloudflare webhook-proxy pattern (requires control_plane_url)"
+  description = "Copy the cluster-agent-credentials mTLS secret into the external-dns namespace ahead of its later KCL-stack install (requires control_plane_url)"
   type        = bool
   default     = true
 }
 
-variable "dns_webhook_image_tag" {
-  description = "Tag for public.ecr.aws/quantdata/cogrion/dns-webhook (external-dns webhook sidecar)"
-  type        = string
-  default     = "0.1.1"
+variable "eks_addon_versions" {
+  description = "EKS managed add-on versions, keyed by add-on name. Defaults are the latest versions compatible with eks_kubernetes_version at the time this example was last updated — override per-key to pin something else."
+  type = object({
+    coredns                = optional(string, "v1.14.3-eksbuild.3")
+    kube_proxy             = optional(string, "v1.36.0-eksbuild.9")
+    vpc_cni                = optional(string, "v1.22.3-eksbuild.1")
+    eks_pod_identity_agent = optional(string, "v1.3.10-eksbuild.3")
+    aws_ebs_csi_driver     = optional(string, "v1.62.0-eksbuild.1")
+  })
+  default = {}
+}
+
+variable "eks_blueprints_addon_versions" {
+  description = "Helm chart versions for the eks_blueprints_addons module's sub-addons, keyed by addon name. Defaults are the latest chart versions at the time this example was last updated — override per-key to pin something else."
+  type = object({
+    cluster_autoscaler              = optional(string, "9.58.0")
+    aws_efs_csi_driver              = optional(string, "4.3.0")
+    cluster_proportional_autoscaler = optional(string, "1.1.0")
+    metrics_server                  = optional(string, "3.13.1")
+    aws_load_balancer_controller    = optional(string, "3.4.1")
+    external_secrets                = optional(string, "2.7.0")
+  })
+  default = {}
 }
 
 variable "eks_blueprints_addons" {
@@ -151,6 +170,7 @@ variable "eks_blueprints_addons" {
     Accepts any attribute that module supports. For aws_load_balancer_controller,
     vpcId is injected automatically — add extra `set` entries under
     aws_load_balancer_controller.set instead of overriding it wholesale.
+    Chart versions are not set here — see eks_blueprints_addon_versions.
     Traefik and external-dns are managed separately in helm-addons.tf, not here.
     cert-manager is not used — wildcard TLS certs are issued by the control-plane
     via ACME/Cloudflare and synced into the cluster via ESO.
@@ -169,7 +189,7 @@ variable "bootstrap_token" {
 variable "agent_version" {
   description = "cplane-agent Helm chart version (composite tag, e.g. 0.1.13-0.1.30)"
   type        = string
-  default     = ""
+  default     = "0.1.13-0.1.30"
 }
 
 variable "tofu_backend_bucket" {
