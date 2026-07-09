@@ -62,6 +62,7 @@ args=(
   --traefik-subnets "$TRAEFIK_SUBNETS"
   # The Job has no stdin to read the interactive 'yes' confirmation from.
   --auto-approve
+  --register-only
 )
 
 if [[ "${ENABLE_EXTERNAL_DNS:-true}" == "false" ]]; then
