@@ -33,3 +33,91 @@ resource "helm_release" "traefik" {
 
   depends_on = [module.eks]
 }
+
+# ---------------------------------------------------------------------------
+# external-dns — with the dns-webhook sidecar, which proxies the external-dns
+# webhook provider protocol to the control plane (holds the Cloudflare
+# token — it never reaches the tenant cluster). Values mirror
+# cogrion_bootstrap.addons.make_external_dns. The mTLS client cert/key/CA the
+# sidecar reads come from the cluster-agent-credentials secret, which the
+# bootstrap Job (--register-only) copies into this namespace before this
+# release installs — see bootstrap.tf.
+# ---------------------------------------------------------------------------
+resource "helm_release" "external_dns" {
+  count = var.enable_external_dns ? 1 : 0
+
+  name       = "external-dns"
+  repository = "https://kubernetes-sigs.github.io/external-dns"
+  chart      = "external-dns"
+  version    = "1.21.1"
+  namespace  = "external-dns"
+  timeout    = 120
+
+  values = [yamlencode({
+    provider = {
+      name = "webhook"
+      webhook = {
+        image = {
+          repository = "public.ecr.aws/quantdata/cogrion/dns-webhook"
+          tag        = var.dns_webhook_tag
+        }
+        env = [
+          { name = "CONTROL_PLANE_URL", value = var.control_plane_url },
+          # 8888 matches external-dns's own --webhook-provider-url default
+          # (dns-webhook >=0.1.2), so no extraArgs override is needed for
+          # the client side.
+          { name = "PORT", value = "8888" },
+          { name = "LOG_LEVEL", value = "debug" },
+          {
+            name = "MTLS_CLIENT_CERT"
+            valueFrom = {
+              secretKeyRef = {
+                name = "cluster-agent-credentials"
+                key  = "CPLANE_AGENT_MTLS_CLIENT_CERT"
+              }
+            }
+          },
+          {
+            name = "MTLS_CLIENT_KEY"
+            valueFrom = {
+              secretKeyRef = {
+                name = "cluster-agent-credentials"
+                key  = "CPLANE_AGENT_MTLS_CLIENT_KEY"
+              }
+            }
+          },
+          {
+            name = "MTLS_CA_CERT"
+            valueFrom = {
+              secretKeyRef = {
+                name = "cluster-agent-credentials"
+                key  = "CPLANE_AGENT_MTLS_CA_CERT"
+              }
+            }
+          },
+        ]
+        # The chart hardcodes containerPort 8080 for the webhook container's
+        # `http-webhook` named port (templates/deployment.yaml, not
+        # values-driven), but its probes default to targeting that name —
+        # which resolves to 8080, not the 8888 we actually bind (PORT above).
+        # Point the probes at the literal port instead of the named one.
+        livenessProbe = {
+          httpGet = {
+            path = "/healthz"
+            port = 8888
+          }
+        }
+        readinessProbe = {
+          httpGet = {
+            path = "/healthz"
+            port = 8888
+          }
+        }
+      }
+    }
+    policy  = "sync"
+    sources = ["service", "ingress"]
+  })]
+
+  depends_on = [kubernetes_job_v1.bootstrap]
+}

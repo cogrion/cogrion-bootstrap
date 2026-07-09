@@ -134,9 +134,15 @@ variable "enable_traefik" {
 }
 
 variable "enable_external_dns" {
-  description = "Copy the cluster-agent-credentials mTLS secret into the external-dns namespace ahead of its later KCL-stack install (requires control_plane_url)"
+  description = "Install external-dns with the dns-webhook sidecar (requires control_plane_url). The bootstrap Job copies the cluster-agent-credentials mTLS secret into the external-dns namespace before this installs."
   type        = bool
   default     = true
+}
+
+variable "dns_webhook_tag" {
+  description = "Image tag for the dns-webhook external-dns sidecar"
+  type        = string
+  default     = "0.1.5"
 }
 
 variable "eks_addon_versions" {
