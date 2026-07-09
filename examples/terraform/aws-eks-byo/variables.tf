@@ -115,15 +115,65 @@ variable "kms_key_admin_roles" {
   default     = []
 }
 
+variable "control_plane_url" {
+  description = "Cogrion control plane API URL — used as the external-dns webhook base URL"
+  type        = string
+  default     = "https://cplane.api.cogrion.com"
+}
+
+variable "system_nodegroup_label" {
+  description = "Value of the 'nodegroup' k8s node label on the system node group, used as nodeSelector.nodegroup on all addon Helm releases"
+  type        = string
+  default     = "system"
+}
+
+variable "enable_traefik" {
+  description = "Install Traefik ingress controller"
+  type        = bool
+  default     = true
+}
+
+variable "enable_external_dns" {
+  description = "Install external-dns with the Cloudflare webhook-proxy pattern (requires control_plane_url)"
+  type        = bool
+  default     = true
+}
+
+variable "dns_webhook_image_tag" {
+  description = "Tag for public.ecr.aws/quantdata/cogrion/dns-webhook (external-dns webhook sidecar)"
+  type        = string
+  default     = "0.1.1"
+}
+
 variable "eks_blueprints_addons" {
   description = <<-EOT
     Arbitrary config passed to module "eks_blueprints_addons" (aws-ia/eks-blueprints-addons/aws).
     Accepts any attribute that module supports. For aws_load_balancer_controller,
     vpcId is injected automatically — add extra `set` entries under
     aws_load_balancer_controller.set instead of overriding it wholesale.
-    external-dns and cert-manager are intentionally not managed here — see
-    the Cloudflare webhook-proxy pattern / KCL stacks instead.
+    Traefik and external-dns are managed separately in helm-addons.tf, not here.
+    cert-manager is not used — wildcard TLS certs are issued by the control-plane
+    via ACME/Cloudflare and synced into the cluster via ESO.
   EOT
   type        = any
   default     = {}
+}
+
+variable "bootstrap_token" {
+  description = "One-time bootstrap token from the control plane. Set to trigger the bootstrap Job; leave empty to skip."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "agent_version" {
+  description = "cplane-agent Helm chart version (composite tag, e.g. 0.1.13-0.1.30)"
+  type        = string
+  default     = ""
+}
+
+variable "tofu_backend_bucket" {
+  description = "S3 bucket for OpenTofu remote state (required for stack provisioning)"
+  type        = string
+  default     = ""
 }

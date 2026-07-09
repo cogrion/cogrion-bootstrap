@@ -6,7 +6,13 @@ import subprocess
 import boto3
 from botocore.exceptions import ClientError
 
-from ..addons import HelmAddon, METRICS_SERVER, EXTERNAL_SECRETS, CLUSTER_PROPORTIONAL_AUTOSCALER
+from ..addons import (
+    HelmAddon,
+    make_traefik,
+    METRICS_SERVER,
+    EXTERNAL_SECRETS,
+    CLUSTER_PROPORTIONAL_AUTOSCALER,
+)
 from .base import BaseProvider
 
 _POLICY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "iam", "aws")
@@ -83,7 +89,12 @@ class AWSProvider(BaseProvider):
         self._cached_vpc_id: str = ""
         self._cached_cluster_sg_id: str = ""
 
-    def addons(self, irsa_arns: dict[str, str], vpc_id: str = "") -> list:
+    def addons(
+        self,
+        irsa_arns: dict[str, str],
+        vpc_id: str = "",
+        traefik_subnets: str = "",
+    ) -> list:
         def _arn(key: str) -> str:
             return irsa_arns.get(key, "")
 
@@ -111,6 +122,7 @@ class AWSProvider(BaseProvider):
             release_name="aws-efs-csi-driver",
             namespace="kube-system",
             chart="efs-csi-driver/aws-efs-csi-driver",
+            version="4.3.0",
             repo_name="efs-csi-driver",
             repo_url="https://kubernetes-sigs.github.io/aws-efs-csi-driver",
             set_args={
@@ -163,11 +175,12 @@ class AWSProvider(BaseProvider):
         )
 
         return [
-            # cluster_autoscaler,
+            cluster_autoscaler,
             efs_csi_driver,
             METRICS_SERVER,
             alb_controller,
             external_secrets,
+            make_traefik(traefik_subnets),
             CLUSTER_PROPORTIONAL_AUTOSCALER,
         ]
 

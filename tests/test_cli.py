@@ -102,6 +102,7 @@ def test_install_addons_calls_helm_apply_for_helm_addon(mocker):
         chart="repo/my-chart",
         version="",
         set_args={"key": "val"},
+        values_yaml="",
         dry_run=False,
     )
 
@@ -193,10 +194,47 @@ def test_main_errors_on_unsupported_provider(mocker):
         main()
 
 
+def test_main_aborts_when_user_does_not_confirm(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
+            "--dry-run",
+        ],
+    )
+    mocker.patch("builtins.input", return_value="no")
+    from cogrion_bootstrap.cli import main
+
+    with pytest.raises(SystemExit):
+        main()
+
+
 def test_main_errors_when_cluster_name_missing_for_aws(mocker):
     mocker.patch(
         "sys.argv",
-        ["cogrion-bootstrap", "--token", "tok", "--provider", "aws", "--region", "ap-southeast-1"],
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--region",
+            "ap-southeast-1",
+            "--node-group-label",
+            "system",
+        ],
     )
     from cogrion_bootstrap.cli import main
 
@@ -215,6 +253,8 @@ def test_main_errors_when_region_missing_for_aws(mocker):
             "aws",
             "--cluster-name",
             "my-cluster",
+            "--node-group-label",
+            "system",
         ],
     )
     from cogrion_bootstrap.cli import main
@@ -236,7 +276,33 @@ def test_main_errors_when_vpc_id_missing_with_alb_controller(mocker):
             "my-cluster",
             "--region",
             "ap-southeast-1",
+            "--node-group-label",
+            "system",
             "--enable-alb-controller",
+        ],
+    )
+    from cogrion_bootstrap.cli import main
+
+    with pytest.raises(SystemExit):
+        main()
+
+
+def test_main_errors_when_traefik_subnets_missing(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            # --traefik-subnets intentionally omitted
         ],
     )
     from cogrion_bootstrap.cli import main
@@ -258,6 +324,10 @@ def test_main_aws_happy_path(mocker):
             "my-cluster",
             "--region",
             "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
             "--dry-run",
         ],
     )
@@ -269,13 +339,37 @@ def test_main_aws_happy_path(mocker):
     provider_mock.ensure_cloud_resources = MagicMock()
     provider_mock.ensure_iam = MagicMock(return_value={})
     mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider", return_value=provider_mock)
+    mocker.patch("builtins.input", return_value="yes")
 
     from cogrion_bootstrap.cli import main
 
     main()
 
     provider_mock.ensure_cloud_resources.assert_called_once()
-    provider_mock.ensure_iam.assert_called_once()
+    provider_mock.ensure_iam.assert_not_called()
+
+
+def test_main_errors_when_no_create_node_group_without_node_group_label(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--no-create-node-group",
+            # --node-group-label intentionally omitted — label on existing nodes is unknown
+        ],
+    )
+    from cogrion_bootstrap.cli import main
+
+    with pytest.raises(SystemExit):
+        main()
 
 
 def test_main_aws_no_create_irsa(mocker):
@@ -291,6 +385,10 @@ def test_main_aws_no_create_irsa(mocker):
             "my-cluster",
             "--region",
             "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
             "--no-create-irsa",
             "--dry-run",
         ],
@@ -299,6 +397,7 @@ def test_main_aws_no_create_irsa(mocker):
     mocker.patch("cogrion_bootstrap.cli.register_agent", return_value=reg_result)
     provider_mock = MagicMock()
     mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider", return_value=provider_mock)
+    mocker.patch("builtins.input", return_value="yes")
 
     from cogrion_bootstrap.cli import main
 
@@ -320,6 +419,10 @@ def test_main_aws_agent_set_overrides_reach_cplane_agent_helm_apply(mocker):
             "my-cluster",
             "--region",
             "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
             "--agent-set",
             "autoscaling.enabled=false",
             "--agent-set",
@@ -333,6 +436,7 @@ def test_main_aws_agent_set_overrides_reach_cplane_agent_helm_apply(mocker):
     provider_mock.ensure_iam = MagicMock(return_value={})
     mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider", return_value=provider_mock)
     helm_apply = mocker.patch("cogrion_bootstrap.cli.helm_apply")
+    mocker.patch("builtins.input", return_value="yes")
 
     from cogrion_bootstrap.cli import main
 
@@ -359,6 +463,10 @@ def test_main_aws_addon_disable_flags(mocker):
             "my-cluster",
             "--region",
             "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
             "--no-cluster-autoscaler",
             "--no-efs-csi-driver",
             "--no-metrics-server",
@@ -372,6 +480,7 @@ def test_main_aws_addon_disable_flags(mocker):
     provider_mock = MagicMock()
     provider_mock.ensure_iam = MagicMock(return_value={})
     mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider", return_value=provider_mock)
+    mocker.patch("builtins.input", return_value="yes")
 
     from cogrion_bootstrap.cli import main
 

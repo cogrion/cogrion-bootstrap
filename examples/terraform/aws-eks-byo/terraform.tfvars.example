@@ -67,6 +67,20 @@ eks_managed_node_groups = {
   }
 }
 
+# Cogrion control plane URL — used as the external-dns webhook base URL.
+# Override for dev/staging environments.
+control_plane_url = "https://cplane.api.cogrion.com"
+
+# Value of the 'nodegroup' k8s node label on the system node group.
+# Must match what's set on the nodes — verify with:
+#   kubectl get nodes --show-labels | grep nodegroup
+system_nodegroup_label = "system"
+
+# Traefik and external-dns — enabled by default.
+# Set false if you are using cogrion-bootstrap CLI instead of Terraform for these.
+enable_traefik      = true
+enable_external_dns = true
+
 # All eks-blueprints-addons enabled except karpenter (enable_karpenter is
 # hardcoded false in eks-cluster.tf — not controllable via this var).
 eks_blueprints_addons = {
@@ -77,3 +91,6 @@ eks_blueprints_addons = {
   enable_aws_load_balancer_controller    = true
   enable_external_secrets                = true
 }
+
+bootstrap_token = ""
+agent_version   = "0.1.13-0.1.30"
