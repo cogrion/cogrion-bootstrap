@@ -195,7 +195,7 @@ variable "bootstrap_token" {
 variable "agent_version" {
   description = "cplane-agent Helm chart version (composite tag, e.g. 0.1.13-0.1.30)"
   type        = string
-  default     = "0.1.13-0.1.30"
+  default     = "0.1.13-0.1.32"
 }
 
 variable "tofu_backend_bucket" {
