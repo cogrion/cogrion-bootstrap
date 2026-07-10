@@ -60,6 +60,9 @@ args=(
   --node-group-label "${NODE_GROUP_LABEL:-system}"
   --agent-version "${AGENT_VERSION:-}"
   --traefik-subnets "$TRAEFIK_SUBNETS"
+  # The Job has no stdin to read the interactive 'yes' confirmation from.
+  --auto-approve
+  --register-only
 )
 
 if [[ "${ENABLE_EXTERNAL_DNS:-true}" == "false" ]]; then

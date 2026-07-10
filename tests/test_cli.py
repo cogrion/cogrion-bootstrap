@@ -221,6 +221,117 @@ def test_main_aborts_when_user_does_not_confirm(mocker):
         main()
 
 
+def test_main_register_only_skips_node_group_irsa_addons_and_agent(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
+            "--register-only",
+        ],
+    )
+    register_mock = mocker.patch(
+        "cogrion_bootstrap.cli.register_agent",
+        return_value=MagicMock(ext_account_id="111122223333", ext_workspace_id="w-test01"),
+    )
+    copy_secret_mock = mocker.patch("cogrion_bootstrap.cli._copy_secret_to_namespace")
+    provider_class_mock = mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider")
+    helm_apply_mock = mocker.patch("cogrion_bootstrap.cli.helm_apply")
+    input_mock = mocker.patch("builtins.input", side_effect=EOFError)
+
+    from cogrion_bootstrap.cli import main
+
+    main()
+
+    register_mock.assert_called_once()
+    copy_secret_mock.assert_called_once_with(
+        secret_name="cluster-agent-credentials",
+        src_namespace="cogrion-system",
+        dst_namespace="external-dns",
+        dry_run=False,
+    )
+    provider_class_mock.assert_not_called()
+    helm_apply_mock.assert_not_called()
+    input_mock.assert_not_called()
+
+
+def test_main_register_only_skips_secret_copy_when_external_dns_disabled(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
+            "--register-only",
+            "--no-external-dns",
+        ],
+    )
+    mocker.patch("cogrion_bootstrap.cli.register_agent", return_value=MagicMock())
+    copy_secret_mock = mocker.patch("cogrion_bootstrap.cli._copy_secret_to_namespace")
+
+    from cogrion_bootstrap.cli import main
+
+    main()
+
+    copy_secret_mock.assert_not_called()
+
+
+def test_main_auto_approve_skips_confirmation_prompt(mocker):
+    mocker.patch(
+        "sys.argv",
+        [
+            "cogrion-bootstrap",
+            "--token",
+            "tok",
+            "--provider",
+            "aws",
+            "--cluster-name",
+            "my-cluster",
+            "--region",
+            "ap-southeast-1",
+            "--node-group-label",
+            "system",
+            "--traefik-subnets",
+            "subnet-aaa,subnet-bbb",
+            "--dry-run",
+            "--auto-approve",
+        ],
+    )
+    reg_result = MagicMock(
+        ext_account_id="111122223333", ext_workspace_id="w-test01", skipped=False
+    )
+    mocker.patch("cogrion_bootstrap.cli.register_agent", return_value=reg_result)
+    provider_mock = MagicMock()
+    provider_mock.ensure_cloud_resources = MagicMock()
+    provider_mock.ensure_iam = MagicMock(return_value={})
+    mocker.patch("cogrion_bootstrap.providers.aws.AWSProvider", return_value=provider_mock)
+    # A real bootstrap Job has no stdin — input() would raise EOFError if called.
+    input_mock = mocker.patch("builtins.input", side_effect=EOFError)
+
+    from cogrion_bootstrap.cli import main
+
+    main()
+
+    input_mock.assert_not_called()
+
+
 def test_main_errors_when_cluster_name_missing_for_aws(mocker):
     mocker.patch(
         "sys.argv",

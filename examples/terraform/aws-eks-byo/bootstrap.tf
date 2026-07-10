@@ -1,42 +1,38 @@
 # ---------------------------------------------------------------------------
 # Cogrion bootstrap Job
 #
-# Clones cogrion-bootstrap and runs the CLI to register the cluster with the
-# control plane, install all addons (Traefik, external-dns, etc.), and install
-# cplane-agent.
+# Clones cogrion-bootstrap and runs the CLI with --register-only: registers
+# the cluster with the control plane, writes cluster-agent-credentials, and
+# copies it into the external-dns namespace. Nothing else — mirrors
+# production (terraform-workspace-infra-aws/modules/workspace-cluster-bootstrap),
+# where Terraform owns every addon (see eks-cluster.tf/helm-addons.tf) and
+# cplane-agent/external-dns are installed later via KCL stacks, not this Job.
 #
 # Gated on var.bootstrap_token being non-empty.
-# Recreated automatically when bootstrap_token or agent_version changes.
+# Recreated automatically when bootstrap_token changes.
 # ---------------------------------------------------------------------------
 
 locals {
-  bootstrap_enabled        = var.bootstrap_token != ""
+  bootstrap_enabled         = var.bootstrap_token != ""
   bootstrap_script_checksum = substr(filesha256("${path.module}/bootstrap.sh"), 0, 8)
 }
 
 # ---------------------------------------------------------------------------
-# IAM policy — S3 permissions for OpenTofu remote state and KubeBlocks backups
+# IAM policy — everything cogrion_bootstrap.providers.aws.AWSProvider needs to
+# call from inside the Job itself: S3 (tofu state/KubeBlocks backups), EKS
+# (cluster/nodegroup describe + node group lifecycle), EC2 (node security
+# group + launch template provisioning), IAM (IRSA role/policy provisioning
+# via ensure_iam()), and STS (caller identity).
 # ---------------------------------------------------------------------------
 resource "aws_iam_policy" "bootstrap" {
   count       = local.bootstrap_enabled ? 1 : 0
   name        = "${local.platform_id}-bootstrap-policy"
   description = "Cogrion bootstrap job policy"
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:CreateBucket", "s3:DeleteBucket", "s3:ListBucket",
-          "s3:PutBucketEncryption", "s3:GetBucketEncryption",
-          "s3:PutBucketPublicAccessBlock", "s3:GetBucketPublicAccessBlock",
-        ]
-        Resource = [
-          "arn:aws:s3:::${local.platform_id}*",
-          "arn:aws:s3:::${local.platform_id}*/*",
-        ]
-      }
-    ]
+  policy = templatefile("${path.module}/bootstrap_policy.json", {
+    platform_id  = local.platform_id
+    account_id   = data.aws_caller_identity.current.account_id
+    region       = var.region
+    cluster_name = local.platform_id
   })
   tags = local.tags
 }
@@ -134,14 +130,23 @@ resource "kubernetes_config_map_v1" "bootstrap_script" {
 }
 
 # ---------------------------------------------------------------------------
-# Trigger — recreates the Job when token or agent version changes
+# Trigger — recreates the Job when any of its env inputs change. The Job's
+# pod template is immutable at the k8s API level, so Terraform can't just
+# patch it in place; this forces a replace via replace_triggered_by below.
 # ---------------------------------------------------------------------------
 resource "terraform_data" "bootstrap_trigger" {
   count = local.bootstrap_enabled ? 1 : 0
   input = {
-    token         = var.bootstrap_token
-    agent_version = var.agent_version
-    checksum      = local.bootstrap_script_checksum
+    token               = var.bootstrap_token
+    checksum            = local.bootstrap_script_checksum
+    enable_external_dns = var.enable_external_dns
+    control_plane_url   = var.control_plane_url
+    cluster_name        = local.platform_id
+    region              = var.region
+    tofu_backend_bucket = var.tofu_backend_bucket
+    traefik_subnets     = join(",", module.vpc.public_subnets)
+    agent_version       = var.agent_version
+    node_group_label    = var.system_nodegroup_label
   }
 }
 
@@ -186,7 +191,7 @@ resource "kubernetes_job_v1" "bootstrap" {
           }
           env {
             name  = "CLUSTER_NAME"
-            value = module.eks.cluster_name
+            value = local.platform_id
           }
           env {
             name  = "REGION"
@@ -201,20 +206,16 @@ resource "kubernetes_job_v1" "bootstrap" {
             value = join(",", module.vpc.public_subnets)
           }
           env {
-            name  = "NODE_GROUP_LABEL"
-            value = var.system_nodegroup_label
-          }
-          env {
             name  = "AGENT_VERSION"
             value = var.agent_version
           }
           env {
-            name  = "ENABLE_EXTERNAL_DNS"
-            value = var.enable_external_dns ? "true" : "false"
+            name  = "NODE_GROUP_LABEL"
+            value = var.system_nodegroup_label
           }
           env {
-            name  = "DNS_WEBHOOK_TAG"
-            value = var.dns_webhook_image_tag
+            name  = "ENABLE_EXTERNAL_DNS"
+            value = var.enable_external_dns ? "true" : "false"
           }
 
           volume_mount {
@@ -255,17 +256,12 @@ resource "kubernetes_job_v1" "bootstrap" {
     replace_triggered_by = [terraform_data.bootstrap_trigger[0]]
   }
 
-  # Runs last: the CLI also installs/configures Traefik (see bootstrap.sh's
-  # --traefik-subnets flag), which would otherwise race against the
-  # Terraform-managed helm_release.traefik in helm-addons.tf. external-dns is
-  # installed by the CLI itself (not Terraform) — see bootstrap.sh.
+  # register-only doesn't touch any addon — just needs the cluster to exist.
   depends_on = [
     module.bootstrap_irsa,
     kubernetes_cluster_role_binding_v1.bootstrap,
     kubernetes_secret_v1.bootstrap_token,
     kubernetes_config_map_v1.bootstrap_script,
     module.eks,
-    module.eks_blueprints_addons,
-    helm_release.traefik,
   ]
 }

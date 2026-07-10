@@ -256,6 +256,19 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Print actions without executing anything"
     )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Skip the interactive 'yes' confirmation prompt (for unattended/CI runs, "
+        "e.g. the bootstrap Kubernetes Job, which has no stdin to read from)",
+    )
+    parser.add_argument(
+        "--register-only",
+        action="store_true",
+        help="Only register with the control plane and copy the mTLS secret to the "
+        "external-dns namespace, then exit — skip node group/IRSA/addons/cplane-agent. "
+        "For setups where Terraform (or another tool) owns everything else.",
+    )
 
     # AWS
     aws = parser.add_argument_group("AWS")
@@ -345,7 +358,7 @@ def main():
     if args.provider in ("alicloud", "gcp", "azure"):
         parser.error(f"--provider {args.provider} is not yet supported — coming soon")
 
-    if args.provider == "aws":
+    if args.provider == "aws" and not args.register_only:
         if not args.cluster_name:
             parser.error("--cluster-name is required for --provider aws")
         if not args.region:
@@ -367,6 +380,28 @@ def main():
             )
 
     dry = args.dry_run
+
+    if args.register_only:
+        if args.provider != "aws":
+            parser.error("--register-only currently only supports --provider aws")
+        register_agent(
+            control_plane_url=args.control_plane_url,
+            token=args.token,
+            namespace=args.namespace,
+            dry_run=dry,
+        )
+        if not args.no_external_dns:
+            _copy_secret_to_namespace(
+                secret_name="cluster-agent-credentials",
+                src_namespace=args.namespace,
+                dst_namespace="external-dns",
+                dry_run=dry,
+            )
+        print(
+            "[cogrion-bootstrap] --register-only: registration complete — "
+            "skipping node group/IRSA/addons/cplane-agent."
+        )
+        return
 
     # When we create the node group we set labels={"nodegroup": node_group_name},
     # so the label value safely defaults to the name. For existing node groups the
@@ -410,13 +445,16 @@ def main():
 
     _print_plan(args, node_group_label, addons_to_install)
 
-    print("  Only 'yes' will be accepted to approve.")
-    print()
-    answer = input("  Enter a value: ").strip()
-    if answer != "yes":
+    if args.auto_approve:
+        print("  --auto-approve set — skipping confirmation.")
+    else:
+        print("  Only 'yes' will be accepted to approve.")
         print()
-        print("Error: Bootstrap cancelled.")
-        sys.exit(1)
+        answer = input("  Enter a value: ").strip()
+        if answer != "yes":
+            print()
+            print("Error: Bootstrap cancelled.")
+            sys.exit(1)
 
     node_selector_set = {"nodeSelector.nodegroup": node_group_label}
 

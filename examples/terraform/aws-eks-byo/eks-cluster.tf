@@ -57,16 +57,20 @@ module "eks" {
   # Amazon EKS Managed Add-ons
   #---------------------------------------
   addons = {
-    coredns = {}
+    coredns = {
+      addon_version = var.eks_addon_versions.coredns
+    }
     eks-pod-identity-agent = {
       before_compute = true
+      addon_version  = var.eks_addon_versions.eks_pod_identity_agent
     }
-    kube-proxy = {}
+    kube-proxy = {
+      addon_version = var.eks_addon_versions.kube_proxy
+    }
     vpc-cni = {
       before_compute = true
       preserve       = true
-      most_recent    = false
-      addon_version  = "v1.20.4-eksbuild.3"
+      addon_version  = var.eks_addon_versions.vpc_cni
       configuration_values = jsonencode({
         env = {
           # https://docs.aws.amazon.com/eks/latest/userguide/cni-increase-ip-addresses.html
@@ -77,8 +81,7 @@ module "eks" {
     }
     aws-ebs-csi-driver = {
       service_account_role_arn = module.ebs_csi_driver_irsa.iam_role_arn
-      most_recent              = false
-      addon_version            = "v1.48.0-eksbuild.2"
+      addon_version            = var.eks_addon_versions.aws_ebs_csi_driver
     }
   }
 
@@ -205,14 +208,18 @@ module "eks_blueprints_addons" {
   # required by the autoscaler's DRA watch loops — without it the autoscaler
   # logs "Failed to watch" errors. Override via eks_blueprints_addons.cluster_autoscaler.
   enable_cluster_autoscaler = try(local._blueprints_config.enable_cluster_autoscaler, false)
-  cluster_autoscaler = {
-    chart_version = "9.57.0"
-  }
+  cluster_autoscaler = merge(
+    try(var.eks_blueprints_addons.cluster_autoscaler, {}),
+    {
+      chart_version = var.eks_blueprints_addon_versions.cluster_autoscaler
+    }
+  )
 
   enable_aws_efs_csi_driver = try(local._blueprints_config.enable_aws_efs_csi_driver, false)
   aws_efs_csi_driver = merge(
     try(var.eks_blueprints_addons.aws_efs_csi_driver, {}),
     {
+      chart_version = var.eks_blueprints_addon_versions.aws_efs_csi_driver
       set = concat(
         try(var.eks_blueprints_addons.aws_efs_csi_driver.set, []),
         [{ name = "nodeSelector.nodegroup", value = "system" }]
@@ -224,6 +231,7 @@ module "eks_blueprints_addons" {
   cluster_proportional_autoscaler = merge(
     try(var.eks_blueprints_addons.cluster_proportional_autoscaler, {}),
     {
+      chart_version = var.eks_blueprints_addon_versions.cluster_proportional_autoscaler
       set = concat(
         try(var.eks_blueprints_addons.cluster_proportional_autoscaler.set, []),
         [
@@ -260,6 +268,7 @@ module "eks_blueprints_addons" {
   metrics_server = merge(
     try(var.eks_blueprints_addons.metrics_server, {}),
     {
+      chart_version = var.eks_blueprints_addon_versions.metrics_server
       set = concat(
         try(var.eks_blueprints_addons.metrics_server.set, []),
         [{ name = "nodeSelector.nodegroup", value = "system" }]
@@ -271,6 +280,7 @@ module "eks_blueprints_addons" {
   aws_load_balancer_controller = merge(
     try(var.eks_blueprints_addons.aws_load_balancer_controller, {}),
     {
+      chart_version = var.eks_blueprints_addon_versions.aws_load_balancer_controller
       set = concat(
         try(var.eks_blueprints_addons.aws_load_balancer_controller.set, []),
         [
@@ -292,6 +302,7 @@ module "eks_blueprints_addons" {
   external_secrets = merge(
     try(var.eks_blueprints_addons.external_secrets, {}),
     {
+      chart_version = var.eks_blueprints_addon_versions.external_secrets
       set = concat(
         try(var.eks_blueprints_addons.external_secrets.set, []),
         [{ name = "nodeSelector.nodegroup", value = "system" }]

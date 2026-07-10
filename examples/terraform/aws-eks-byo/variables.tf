@@ -134,13 +134,13 @@ variable "enable_traefik" {
 }
 
 variable "enable_external_dns" {
-  description = "Install external-dns with the Cloudflare webhook-proxy pattern (requires control_plane_url)"
+  description = "Install external-dns with the dns-webhook sidecar (requires control_plane_url). The bootstrap Job copies the cluster-agent-credentials mTLS secret into the external-dns namespace before this installs."
   type        = bool
   default     = true
 }
 
-variable "dns_webhook_image_tag" {
-  description = "Tag for public.ecr.aws/quantdata/cogrion/dns-webhook (external-dns webhook sidecar)"
+variable "dns_webhook_tag" {
+  description = "Image tag for the dns-webhook external-dns sidecar"
   type        = string
   default     = "0.1.6"
 }
@@ -176,6 +176,7 @@ variable "eks_blueprints_addons" {
     Accepts any attribute that module supports. For aws_load_balancer_controller,
     vpcId is injected automatically — add extra `set` entries under
     aws_load_balancer_controller.set instead of overriding it wholesale.
+    Chart versions are not set here — see eks_blueprints_addon_versions.
     Traefik and external-dns are managed separately in helm-addons.tf, not here.
     cert-manager is not used — wildcard TLS certs are issued by the control-plane
     via ACME/Cloudflare and synced into the cluster via ESO.
@@ -194,7 +195,7 @@ variable "bootstrap_token" {
 variable "agent_version" {
   description = "cplane-agent Helm chart version (composite tag, e.g. 0.1.13-0.1.30)"
   type        = string
-  default     = ""
+  default     = "0.1.13-0.1.30"
 }
 
 variable "tofu_backend_bucket" {
