@@ -142,7 +142,32 @@ variable "enable_external_dns" {
 variable "dns_webhook_image_tag" {
   description = "Tag for public.ecr.aws/quantdata/cogrion/dns-webhook (external-dns webhook sidecar)"
   type        = string
-  default     = "0.1.1"
+  default     = "0.1.6"
+}
+
+variable "eks_addon_versions" {
+  description = "EKS managed add-on versions, keyed by add-on name. Defaults are the latest versions compatible with eks_kubernetes_version at the time this example was last updated — override per-key to pin something else."
+  type = object({
+    coredns                = optional(string, "v1.14.3-eksbuild.3")
+    kube_proxy             = optional(string, "v1.36.0-eksbuild.9")
+    vpc_cni                = optional(string, "v1.22.3-eksbuild.1")
+    eks_pod_identity_agent = optional(string, "v1.3.10-eksbuild.3")
+    aws_ebs_csi_driver     = optional(string, "v1.62.0-eksbuild.1")
+  })
+  default = {}
+}
+
+variable "eks_blueprints_addon_versions" {
+  description = "Helm chart versions for the eks_blueprints_addons module's sub-addons, keyed by addon name. Defaults are the latest chart versions at the time this example was last updated — override per-key to pin something else."
+  type = object({
+    cluster_autoscaler              = optional(string, "9.58.0")
+    aws_efs_csi_driver              = optional(string, "4.3.0")
+    cluster_proportional_autoscaler = optional(string, "1.1.0")
+    metrics_server                  = optional(string, "3.13.1")
+    aws_load_balancer_controller    = optional(string, "3.4.1")
+    external_secrets                = optional(string, "2.7.0")
+  })
+  default = {}
 }
 
 variable "eks_blueprints_addons" {
