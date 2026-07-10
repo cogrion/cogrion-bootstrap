@@ -8,6 +8,34 @@ import urllib.error
 from dataclasses import dataclass
 from typing import Optional
 
+SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+
+def _discover_oidc_issuer() -> Optional[str]:
+    """Read this pod's own projected ServiceAccount token and return its
+    `iss` claim — the cluster's own OIDC issuer URL. Mirrors
+    control-plane/agent's discoverOidcIssuer() (src/lifecycle/oidcIssuer.ts);
+    without this, createClusterAuthMount never runs and ESO can never
+    authenticate to OpenBao for the wildcard TLS cert."""
+    try:
+        with open(SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+    except OSError:
+        return None
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+
+    padded = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    iss = payload.get("iss")
+    return iss if isinstance(iss, str) else None
+
 
 @dataclass
 class RegistrationResult:
@@ -62,7 +90,20 @@ def register_agent(
         print(f"[register] dry-run: would POST {control_plane_url}/api/v1/agent/register")
         return RegistrationResult(skipped=True)
 
-    result = _post_json(f"{control_plane_url}/api/v1/agent/register", {"token": token})
+    oidc_issuer_url = _discover_oidc_issuer()
+    if not oidc_issuer_url:
+        raise RuntimeError(
+            "Could not discover this cluster's OIDC issuer from the bootstrap "
+            "Job's own ServiceAccount token — registering without it would "
+            "leave OpenBao's cluster auth mount unprovisioned, so ESO could "
+            "never authenticate to pull the wildcard TLS cert. Aborting "
+            "installation; please contact Cogrion support."
+        )
+
+    result = _post_json(
+        f"{control_plane_url}/api/v1/agent/register",
+        {"token": token, "oidcIssuerUrl": oidc_issuer_url},
+    )
 
     mtls = result.get("mtls", {})
     client_cert = mtls.get("clientCert", "")
