@@ -117,6 +117,15 @@ resource "helm_release" "external_dns" {
     }
     policy  = "sync"
     sources = ["service", "ingress"]
+
+    # See cluster_agent.tf's matching annotation: ties this pod template to
+    # the bootstrap Job's replace trigger so a credentials rotation (secret
+    # rewritten out-of-band by the Job) actually forces a rollout here too —
+    # the dns-webhook sidecar reads its mTLS cert/key via secretKeyRef, which
+    # k8s does not live-reload.
+    podAnnotations = local.bootstrap_enabled ? {
+      "cogrion.io/credentials-checksum" = terraform_data.bootstrap_trigger[0].id
+    } : {}
   })]
 
   depends_on = [kubernetes_job_v1.bootstrap]

@@ -84,6 +84,18 @@ resource "helm_release" "cplane_agent" {
     value = var.system_nodegroup_label
   }
 
+  # Deleting/rewriting cluster-agent-credentials out-of-band (e.g. to force
+  # re-registration) is invisible to Helm/Terraform — env-var secretKeyRefs
+  # aren't live-reloaded by k8s, and depends_on only affects apply ordering,
+  # not diffing. This annotation ties the pod template to
+  # terraform_data.bootstrap_trigger's id, which changes exactly when the
+  # bootstrap Job gets replaced (see bootstrap.tf), forcing a real rollout
+  # instead of requiring a manual `kubectl rollout restart`.
+  set {
+    name  = "podAnnotations.cogrion\\.io/credentials-checksum"
+    value = terraform_data.bootstrap_trigger[0].id
+  }
+
   # Registration (the bootstrap Job) must have already written
   # cluster-agent-credentials before this release starts, and the SA must
   # exist with its IRSA annotation before the chart's pod starts.
