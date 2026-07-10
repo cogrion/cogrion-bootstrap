@@ -142,7 +142,7 @@ variable "enable_external_dns" {
 variable "dns_webhook_tag" {
   description = "Image tag for the dns-webhook external-dns sidecar"
   type        = string
-  default     = "0.1.5"
+  default     = "0.1.6"
 }
 
 variable "eks_addon_versions" {

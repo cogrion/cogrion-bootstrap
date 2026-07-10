@@ -2,7 +2,16 @@ import base64
 import json
 import pytest
 from unittest.mock import MagicMock
-from cogrion_bootstrap.register import register_agent, RegistrationResult
+from cogrion_bootstrap.register import register_agent, RegistrationResult, _discover_oidc_issuer
+
+
+def _fake_sa_jwt(iss="https://oidc.eks.ap-southeast-1.amazonaws.com/id/EXAMPLE"):
+    def b64url(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
+    header = b64url({"alg": "RS256", "typ": "JWT"})
+    payload = b64url({"iss": iss, "sub": "system:serviceaccount:cogrion-system:bootstrap-sa"})
+    return f"{header}.{payload}.fake-signature"
 
 
 def _response():
@@ -93,6 +102,10 @@ def test_posts_to_correct_register_endpoint(mocker):
             MagicMock(returncode=0),  # kubectl apply
         ],
     )
+    mocker.patch(
+        "cogrion_bootstrap.register._discover_oidc_issuer",
+        return_value="https://oidc.eks.example.com/id/EXAMPLE",
+    )
     post = mocker.patch("cogrion_bootstrap.register._post_json", return_value=_response())
 
     register_agent(
@@ -100,8 +113,25 @@ def test_posts_to_correct_register_endpoint(mocker):
     )
 
     post.assert_called_once_with(
-        "https://cp.example.com/api/v1/agent/register", {"token": "my-token"}
+        "https://cp.example.com/api/v1/agent/register",
+        {"token": "my-token", "oidcIssuerUrl": "https://oidc.eks.example.com/id/EXAMPLE"},
     )
+
+
+def test_register_aborts_when_oidc_issuer_cannot_be_discovered(mocker):
+    # Without oidcIssuerUrl, createClusterAuthMount never runs server-side and
+    # ESO can never authenticate to OpenBao for the wildcard TLS cert — this
+    # must hard-fail the install rather than silently registering anyway.
+    mocker.patch("cogrion_bootstrap.register.subprocess.run", return_value=MagicMock(returncode=1))
+    mocker.patch("cogrion_bootstrap.register._discover_oidc_issuer", return_value=None)
+    post = mocker.patch("cogrion_bootstrap.register._post_json")
+
+    with pytest.raises(RuntimeError, match="OIDC issuer"):
+        register_agent(
+            "https://cp.example.com", token="tok", namespace="cogrion-system", dry_run=False
+        )
+
+    post.assert_not_called()
 
 
 def test_registration_returns_populated_result(mocker):
@@ -113,6 +143,10 @@ def test_registration_returns_populated_result(mocker):
             MagicMock(returncode=0, stdout=b"apiVersion: v1"),
             MagicMock(returncode=0),
         ],
+    )
+    mocker.patch(
+        "cogrion_bootstrap.register._discover_oidc_issuer",
+        return_value="https://oidc.eks.example.com/id/EXAMPLE",
     )
     mocker.patch("cogrion_bootstrap.register._post_json", return_value=_response())
 
@@ -143,6 +177,10 @@ def test_registration_includes_ca_cert_when_present(mocker):
             MagicMock(returncode=0),
         ],
     )
+    mocker.patch(
+        "cogrion_bootstrap.register._discover_oidc_issuer",
+        return_value="https://oidc.eks.example.com/id/EXAMPLE",
+    )
     mocker.patch("cogrion_bootstrap.register._post_json", return_value=resp)
 
     result = register_agent(
@@ -150,6 +188,42 @@ def test_registration_includes_ca_cert_when_present(mocker):
     )
 
     assert "BEGIN CERTIFICATE" in result.mtls_ca_cert
+
+
+def test_discover_oidc_issuer_reads_iss_claim_from_sa_token(mocker, tmp_path):
+    token_path = tmp_path / "token"
+    token_path.write_text(
+        _fake_sa_jwt(iss="https://oidc.eks.ap-southeast-1.amazonaws.com/id/ABC123")
+    )
+    mocker.patch("cogrion_bootstrap.register.SA_TOKEN_PATH", str(token_path))
+
+    assert _discover_oidc_issuer() == "https://oidc.eks.ap-southeast-1.amazonaws.com/id/ABC123"
+
+
+def test_discover_oidc_issuer_returns_none_when_file_missing(mocker, tmp_path):
+    mocker.patch("cogrion_bootstrap.register.SA_TOKEN_PATH", str(tmp_path / "does-not-exist"))
+
+    assert _discover_oidc_issuer() is None
+
+
+def test_discover_oidc_issuer_returns_none_for_malformed_token(mocker, tmp_path):
+    token_path = tmp_path / "token"
+    token_path.write_text("not-a-jwt")
+    mocker.patch("cogrion_bootstrap.register.SA_TOKEN_PATH", str(token_path))
+
+    assert _discover_oidc_issuer() is None
+
+
+def test_discover_oidc_issuer_returns_none_when_iss_claim_missing(mocker, tmp_path):
+    def b64url(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
+    token = f"{b64url({'alg': 'RS256'})}.{b64url({'sub': 'no-iss-here'})}.sig"
+    token_path = tmp_path / "token"
+    token_path.write_text(token)
+    mocker.patch("cogrion_bootstrap.register.SA_TOKEN_PATH", str(token_path))
+
+    assert _discover_oidc_issuer() is None
 
 
 def test_post_json_returns_parsed_response(mocker):
@@ -187,6 +261,10 @@ def test_post_json_raises_on_http_error(mocker):
 
 def test_raises_if_mtls_certs_missing(mocker):
     mocker.patch("cogrion_bootstrap.register.subprocess.run", return_value=MagicMock(returncode=1))
+    mocker.patch(
+        "cogrion_bootstrap.register._discover_oidc_issuer",
+        return_value="https://oidc.eks.example.com/id/EXAMPLE",
+    )
     mocker.patch(
         "cogrion_bootstrap.register._post_json",
         return_value={
