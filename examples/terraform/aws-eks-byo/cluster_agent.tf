@@ -7,11 +7,12 @@
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_policy" "cluster_agent_policy" {
-  name        = "${local.platform_id}-cluster-agent-policy"
+  name        = "${local.cogrion_workspace_prefix}-cluster-agent-policy"
   description = "Cogrion cplane-agent policy"
   policy = templatefile("${path.module}/cluster_agent_policy.json", {
-    platform_id = local.platform_id
-    account_id  = data.aws_caller_identity.current.account_id
+    aws_account_id       = data.aws_caller_identity.current.account_id
+    cogrion_account_id   = var.cogrion_account_id
+    cogrion_workspace_id = local.cogrion_workspace_prefix
   })
   tags = local.tags
 }
@@ -19,7 +20,7 @@ resource "aws_iam_policy" "cluster_agent_policy" {
 module "cluster_agent_irsa" {
   source    = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version   = "~> 5.52.0"
-  role_name = "${local.platform_id}-cluster-agent-role"
+  role_name = "${local.cogrion_workspace_prefix}-cluster-agent-role"
 
   role_policy_arns = {
     policy = aws_iam_policy.cluster_agent_policy.arn
@@ -77,7 +78,7 @@ resource "helm_release" "cplane_agent" {
   }
   set {
     name  = "tofu.backendBucket"
-    value = var.tofu_backend_bucket
+    value = var.terraform_backend_bucket
   }
   set {
     name  = "nodeSelector.nodegroup"

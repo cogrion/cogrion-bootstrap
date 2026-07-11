@@ -6,14 +6,14 @@
 # runs so that KubeBlocks' service accounts can assume it on first start.
 # ---------------------------------------------------------------------------
 resource "aws_iam_policy" "kubeblocks" {
-  name   = "${local.platform_id}-kubeblocks-policy"
+  name   = "${local.cogrion_workspace_prefix}-kubeblocks-policy"
   policy = file("${path.module}/kubeblocks_policy.json")
 }
 
 module "kubeblocks_irsa" {
   source    = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version   = "~> 5.52.0"
-  role_name = "${local.platform_id}-kubeblocks-role"
+  role_name = "${local.cogrion_workspace_prefix}-kubeblocks-role"
 
   role_policy_arns = {
     policy = aws_iam_policy.kubeblocks.arn

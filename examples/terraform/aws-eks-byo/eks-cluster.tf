@@ -36,11 +36,64 @@ locals {
   ]
 }
 
+locals {
+  eks_managed_node_groups = {
+    for key, ng in var.eks_managed_node_groups : key => {
+      name = coalesce(ng.name, format("%s-%s", local.cogrion_workspace_prefix, key))
+
+      iam_role_name = coalesce(ng.name, format("%s-%s", local.cogrion_workspace_prefix, key))
+
+      # stateful=true -> pin to the first (az1) subnet only.
+      # stateful=false -> spread across all EKS data-plane subnets.
+      subnet_ids = ng.stateful ? [local.eks_secondary_subnet_ids[0]] : local.eks_secondary_subnet_ids
+
+      min_size     = ng.min_size
+      max_size     = ng.max_size
+      desired_size = ng.desired_size
+
+      instance_types = ng.instance_types
+
+      use_latest_ami_release_version = ng.use_latest_ami_release_version
+      ami_release_version            = try(ng.ami_release_version, null)
+      ami_type                       = ng.ami_type
+
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 2
+      }
+
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size = ng.disk_size
+            volume_type = ng.disk_type
+          }
+        }
+      }
+
+      labels = ng.labels
+      taints = ng.taints
+
+      tags = merge({
+        Name = format("%s-ng-%s", key, local.cogrion_workspace_prefix)
+
+        "karpenter.sh/discovery" = local.cogrion_workspace_prefix
+
+        # Required for cluster-autoscaler ASG auto-discovery.
+        "k8s.io/cluster-autoscaler/enabled"                           = "true"
+        "k8s.io/cluster-autoscaler/${local.cogrion_workspace_prefix}" = "owned"
+      }, ng.tags)
+    }
+  }
+}
+
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "21.1.5"
 
-  name               = local.platform_id
+  name               = local.cogrion_workspace_prefix
   kubernetes_version = var.eks_kubernetes_version
 
   vpc_id     = module.vpc.vpc_id
@@ -127,10 +180,10 @@ module "eks" {
   eks_managed_node_groups = local.eks_managed_node_groups
 
   security_group_tags = {
-    "karpenter.sh/discovery" = local.platform_id
+    "karpenter.sh/discovery" = local.cogrion_workspace_prefix
   }
   node_security_group_tags = {
-    "karpenter.sh/discovery" = local.platform_id
+    "karpenter.sh/discovery" = local.cogrion_workspace_prefix
   }
 
   tags = local.tags
@@ -142,7 +195,7 @@ module "eks" {
 module "ebs_csi_driver_irsa" {
   source                = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version               = "~> 5.52"
-  role_name             = format("%s-%s", local.platform_id, "ebs-csi-driver")
+  role_name             = format("%s-%s", local.cogrion_workspace_prefix, "ebs-csi-driver")
   attach_ebs_csi_policy = true
   oidc_providers = {
     main = {

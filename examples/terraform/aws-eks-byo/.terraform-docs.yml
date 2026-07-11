@@ -6,4 +6,8 @@ sections:
   hide: []
 sort:
   enabled: true
-  by: required
+  by: name # required | name | type
+  # enabled: false would instead follow variables.tf's own declaration
+  # order, which is already grouped by the file's section comments (Shared,
+  # Tagging, Dual-mode auth, VPC, EKS cluster, ...) — worth trying if the
+  # required/name-sorted table still doesn't read well.
