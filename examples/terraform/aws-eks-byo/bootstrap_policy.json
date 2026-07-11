@@ -14,8 +14,8 @@
         "s3:GetBucketPublicAccessBlock"
       ],
       "Resource": [
-        "arn:aws:s3:::${platform_id}*",
-        "arn:aws:s3:::${platform_id}*/*"
+        "arn:aws:s3:::${cogrion_workspace_id}*",
+        "arn:aws:s3:::${cogrion_workspace_id}*/*"
       ]
     },
     {
@@ -30,8 +30,8 @@
         "eks:TagResource"
       ],
       "Resource": [
-        "arn:aws:eks:${region}:${account_id}:cluster/${cluster_name}",
-        "arn:aws:eks:${region}:${account_id}:nodegroup/${cluster_name}/*/*"
+        "arn:aws:eks:${aws_region}:${aws_account_id}:cluster/${cluster_name}",
+        "arn:aws:eks:${aws_region}:${aws_account_id}:nodegroup/${cluster_name}/*/*"
       ]
     },
     {
@@ -73,15 +73,15 @@
         "iam:DeletePolicyVersion"
       ],
       "Resource": [
-        "arn:aws:iam::${account_id}:role/*",
-        "arn:aws:iam::${account_id}:policy/*"
+        "arn:aws:iam::${aws_account_id}:role/*",
+        "arn:aws:iam::${aws_account_id}:policy/*"
       ]
     },
     {
       "Sid": "PassNodeRoleToEks",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::${account_id}:role/*-node-role"
+      "Resource": "arn:aws:iam::${aws_account_id}:role/*-node-role"
     },
     {
       "Sid": "CallerIdentity",

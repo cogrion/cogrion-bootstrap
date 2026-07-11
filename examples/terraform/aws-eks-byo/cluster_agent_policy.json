@@ -43,10 +43,10 @@
         "s3:GetBucketNotification"
       ],
       "Resource": [
-        "arn:aws:s3:::quant-data-tfstate-${account_id}*",
-        "arn:aws:s3:::quant-data-tfstate-${account_id}*/*",
-        "arn:aws:s3:::${platform_id}*",
-        "arn:aws:s3:::${platform_id}*/*"
+        "arn:aws:s3:::quant-data-tfstate-${cogrion_account_id}*",
+        "arn:aws:s3:::quant-data-tfstate-${cogrion_account_id}*/*",
+        "arn:aws:s3:::${cogrion_workspace_id}*",
+        "arn:aws:s3:::${cogrion_workspace_id}*/*"
       ]
     },
     {

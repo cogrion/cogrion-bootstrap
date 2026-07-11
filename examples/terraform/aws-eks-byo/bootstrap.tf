@@ -26,13 +26,13 @@ locals {
 # ---------------------------------------------------------------------------
 resource "aws_iam_policy" "bootstrap" {
   count       = local.bootstrap_enabled ? 1 : 0
-  name        = "${local.platform_id}-bootstrap-policy"
+  name        = "${local.cogrion_workspace_prefix}-bootstrap-policy"
   description = "Cogrion bootstrap job policy"
   policy = templatefile("${path.module}/bootstrap_policy.json", {
-    platform_id  = local.platform_id
-    account_id   = data.aws_caller_identity.current.account_id
-    region       = var.region
-    cluster_name = local.platform_id
+    cogrion_workspace_id = local.cogrion_workspace_prefix
+    aws_account_id       = data.aws_caller_identity.current.account_id
+    aws_region           = var.region
+    cluster_name         = local.cogrion_workspace_prefix
   })
   tags = local.tags
 }
@@ -45,7 +45,7 @@ module "bootstrap_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.52.0"
 
-  role_name = "${local.platform_id}-bootstrap-role"
+  role_name = "${local.cogrion_workspace_prefix}-bootstrap-role"
 
   role_policy_arns = {
     policy = aws_iam_policy.bootstrap[0].arn
@@ -86,7 +86,7 @@ resource "kubernetes_service_account_v1" "bootstrap" {
 resource "kubernetes_cluster_role_binding_v1" "bootstrap" {
   count = local.bootstrap_enabled ? 1 : 0
   metadata {
-    name = "${local.platform_id}-bootstrap-crb"
+    name = "${local.cogrion_workspace_prefix}-bootstrap-crb"
   }
   role_ref {
     api_group = "rbac.authorization.k8s.io"
@@ -137,16 +137,16 @@ resource "kubernetes_config_map_v1" "bootstrap_script" {
 resource "terraform_data" "bootstrap_trigger" {
   count = local.bootstrap_enabled ? 1 : 0
   input = {
-    token               = var.bootstrap_token
-    checksum            = local.bootstrap_script_checksum
-    enable_external_dns = var.enable_external_dns
-    control_plane_url   = var.control_plane_url
-    cluster_name        = local.platform_id
-    region              = var.region
-    tofu_backend_bucket = var.tofu_backend_bucket
-    traefik_subnets     = join(",", module.vpc.public_subnets)
-    agent_version       = var.agent_version
-    node_group_label    = var.system_nodegroup_label
+    token                    = var.bootstrap_token
+    checksum                 = local.bootstrap_script_checksum
+    enable_external_dns      = var.enable_external_dns
+    control_plane_url        = var.control_plane_url
+    cluster_name             = local.cogrion_workspace_prefix
+    region                   = var.region
+    terraform_backend_bucket = var.terraform_backend_bucket
+    traefik_subnets          = join(",", module.vpc.public_subnets)
+    agent_version            = var.agent_version
+    node_group_label         = var.system_nodegroup_label
   }
 }
 
@@ -191,7 +191,7 @@ resource "kubernetes_job_v1" "bootstrap" {
           }
           env {
             name  = "CLUSTER_NAME"
-            value = local.platform_id
+            value = local.cogrion_workspace_prefix
           }
           env {
             name  = "REGION"
@@ -199,7 +199,7 @@ resource "kubernetes_job_v1" "bootstrap" {
           }
           env {
             name  = "TOFU_BACKEND_BUCKET"
-            value = var.tofu_backend_bucket
+            value = var.terraform_backend_bucket
           }
           env {
             name  = "TRAEFIK_SUBNETS"

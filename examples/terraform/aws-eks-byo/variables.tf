@@ -23,6 +23,90 @@ variable "cogrion_workspace_id" {
   type        = string
 }
 
+# --- Tagging — organizational / operational / compliance / finops ---------
+# All have industry-standard defaults so `terraform plan` works out of the
+# box for a self-deploy customer — override per your own org's conventions.
+# See locals.tf for how these are assembled into tags_account/tags.
+variable "extra_tags" {
+  description = "Additional freeform tags, purely additive on top of var.tags and the mandatory Cogrion/org/compliance tags below"
+  type        = map(string)
+  default     = {}
+}
+
+variable "cost_center" {
+  description = "Finance cost center code for chargeback (e.g. CC-1024)"
+  type        = string
+  default     = "unassigned"
+}
+
+variable "owner" {
+  description = "Individual or team accountable for this infrastructure"
+  type        = string
+  default     = "platform-eng"
+}
+
+variable "project_name" {
+  description = "Logical project/repo grouping (e.g. cogrion-terraform)"
+  type        = string
+  default     = "cogrion-workspace"
+}
+
+variable "environment" {
+  description = "Deployment environment — dev / sandbox / staging / prod, sets the blast-radius boundary"
+  type        = string
+  default     = "dev"
+  validation {
+    condition     = contains(["dev", "sandbox", "staging", "prod"], var.environment)
+    error_message = "environment must be one of: dev, staging, prod."
+  }
+}
+
+variable "service_name" {
+  description = "Component this infrastructure belongs to (e.g. keycloak, argocd)"
+  type        = string
+  default     = "workspace-cluster"
+}
+
+variable "git_commit_sha" {
+  description = "Commit SHA that last applied this resource, for traceability. Normally injected by CI"
+  type        = string
+  default     = "unknown"
+}
+
+variable "data_classification" {
+  description = "Data sensitivity of this workspace — public / internal / confidential / restricted (SOC2 CC6.1, ISO A.8.2)"
+  type        = string
+  default     = "internal"
+  validation {
+    condition     = contains(["public", "internal", "confidential", "restricted"], var.data_classification)
+    error_message = "data_classification must be one of: public, internal, confidential, restricted."
+  }
+}
+
+variable "contains_pii" {
+  description = "Whether this workspace's data includes PII — required for data mapping / GDPR evidence"
+  type        = bool
+  default     = false
+}
+
+variable "backup_policy" {
+  description = "Backup cadence/retention evidence for SOC2 availability criteria (e.g. daily-30d)"
+  type        = string
+  default     = "daily-30d"
+}
+
+variable "retention_policy" {
+  description = "Data retention window evidence (e.g. 30d)"
+  type        = string
+  default     = "30d"
+}
+
+variable "auto_shutdown" {
+  description = "Whether non-prod resources auto-shut-down for cost control"
+  type        = bool
+  default     = false
+}
+
 # --- Dual-mode provider auth ---------------------------------------------
 # Leave assume_role_arn empty for self-deploy mode (your own default
 # credentials). Set it for assume-role mode (Cogrion's own automation
@@ -145,6 +229,59 @@ variable "dns_webhook_tag" {
   default     = "0.1.6"
 }
 
+variable "eks_managed_node_groups" {
+  description = "Map of EKS managed node group configurations. Each key becomes the node group's logical name."
+  type = map(object({
+    name        = optional(string)
+    description = optional(string)
+
+    # When true, pins the node group to a single AZ (first subnet only).
+    # Required for EBS-backed PVCs to avoid "volume node affinity conflict"
+    # when pods are rescheduled across AZs. Defaults to false (multi-AZ
+    # spread) for stateless workloads.
+    stateful = optional(bool, false)
+
+    min_size     = optional(number, 1)
+    max_size     = optional(number, 3)
+    desired_size = optional(number, 1)
+
+    instance_types = optional(list(string), ["m5.xlarge"])
+
+    disk_size = optional(number, 50)
+    disk_type = optional(string, "gp3")
+
+    ami_release_version            = optional(string)
+    use_latest_ami_release_version = optional(bool, false)
+    # https://docs.aws.amazon.com/eks/latest/APIReference/API_Nodegroup.html#AmazonEKS-Type-Nodegroup-amiType
+    ami_type = optional(string)
+
+    labels = optional(map(string), {})
+
+    taints = optional(map(object({
+      key    = string
+      value  = string
+      effect = string
+    })), {})
+
+    tags = optional(map(string), {})
+  }))
+
+  default = {
+    system = {
+      description    = "System EKS managed node group"
+      min_size       = 1
+      max_size       = 3
+      desired_size   = 1
+      instance_types = ["m5.xlarge"]
+      disk_size      = 100
+      labels = {
+        WorkerType    = "ON_DEMAND"
+        NodeGroupType = "system"
+      }
+    }
+  }
+}
+
 variable "eks_addon_versions" {
   description = "EKS managed add-on versions, keyed by add-on name. Defaults are the latest versions compatible with eks_kubernetes_version at the time this example was last updated — override per-key to pin something else."
   type = object({
@@ -198,7 +335,7 @@ variable "agent_version" {
   default     = "0.1.13-0.1.32"
 }
 
-variable "tofu_backend_bucket" {
+variable "terraform_backend_bucket" {
   description = "S3 bucket for OpenTofu remote state (required for stack provisioning)"
   type        = string
   default     = ""

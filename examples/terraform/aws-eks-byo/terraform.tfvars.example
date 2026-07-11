@@ -3,6 +3,24 @@ region = "us-east-1"
 cogrion_account_id   = "my-account"
 cogrion_workspace_id = "w-my-workspace"
 
+# --- Tagging: organizational / operational / compliance / finops ---------
+# All of these have industry-standard defaults (see variables.tf) — shown
+# here for discoverability. Override to match your own org's conventions;
+# the compliance ones (data_classification, contains_pii, backup_policy,
+# retention_policy) feed SOC2/ISO27001 audit evidence tags, so review them
+# rather than leaving the defaults if you're in scope for either framework.
+cost_center         = "unassigned"
+owner               = "platform-eng"
+project_name        = "cogrion-workspace"
+environment         = "dev"
+service_name        = "workspace-cluster"
+git_commit_sha      = "unknown"
+data_classification = "internal"
+contains_pii        = false
+backup_policy       = "daily-30d"
+retention_policy    = "30d"
+auto_shutdown       = false
+
 # Self-deploy mode (default): leave these unset, use your own credentials.
 # Assume-role mode: uncomment and set to the role Cogrion should assume.
 # assume_role_arn          = "arn:aws:iam::123456789012:role/cogrion-provisioning"
