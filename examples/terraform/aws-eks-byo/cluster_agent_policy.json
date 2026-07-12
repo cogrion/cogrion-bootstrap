@@ -45,6 +45,8 @@
       "Resource": [
         "arn:aws:s3:::quant-data-tfstate-${cogrion_account_id}*",
         "arn:aws:s3:::quant-data-tfstate-${cogrion_account_id}*/*",
+        "arn:aws:s3:::${cogrion_workspace_prefix}*",
+        "arn:aws:s3:::${cogrion_workspace_prefix}*/*",
         "arn:aws:s3:::${cogrion_workspace_id}*",
         "arn:aws:s3:::${cogrion_workspace_id}*/*"
       ]
