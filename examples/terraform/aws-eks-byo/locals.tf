@@ -75,4 +75,14 @@ locals {
   })
 
   cogrion_workspace_prefix = format("cogrion-%s", var.cogrion_workspace_id)
+
+  # Traefik's NLB, tagged via the in-tree service-controller's
+  # aws-load-balancer-additional-resource-tags annotation (helm-addons.tf) —
+  # that controller has no annotation to rename the resource itself
+  # (aws-load-balancer-name is AWS Load Balancer Controller-only, confirmed
+  # unsupported/silently ignored here), so Name is added explicitly as a tag
+  # instead of relying on local.tags alone.
+  tags_traefik_lb = merge(local.tags, {
+    Name = "${local.cogrion_workspace_prefix}-traefik"
+  })
 }

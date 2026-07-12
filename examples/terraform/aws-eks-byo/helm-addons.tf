@@ -18,15 +18,33 @@ resource "helm_release" "traefik" {
     value = var.system_nodegroup_label
   }
 
+  # Single Service:LoadBalancer for the whole cluster — every app routes
+  # through this one Traefik Ingress, not a Service:LoadBalancer of its own.
+  # "aws-load-balancer-type: nlb" is required explicitly: without it, the
+  # legacy in-tree AWS cloud provider defaults to a Classic ELB, not NLB,
+  # regardless of the subnets annotation below. This annotation is honored
+  # by the legacy in-tree provider directly, so it works whether or not the
+  # aws_load_balancer_controller addon is enabled for this environment.
+  #
   # NLB subnet discovery: explicitly list the public subnets so AWS knows
   # where to create the load balancer. Without this the service-controller
   # errors "could not find any suitable subnets for creating the ELB".
   # Using values/yamlencode instead of a set block because Helm parses
   # comma-separated values in --set as multiple key=value pairs.
+  #
+  # aws-load-balancer-additional-resource-tags: local.tags_traefik_lb
+  # (locals.tf) — same tags as the EKS cluster itself, plus an explicit Name
+  # tag, since the in-tree service-controller has no annotation to rename
+  # the resource itself (aws-load-balancer-name is AWS Load Balancer
+  # Controller-only — confirmed unsupported/silently ignored here). The
+  # annotation takes a plain "k1=v1,k2=v2" string, not a map, since k8s
+  # annotation values are always strings.
   values = [yamlencode({
     service = {
       annotations = {
-        "service.beta.kubernetes.io/aws-load-balancer-subnets" = join(",", module.vpc.public_subnets)
+        "service.beta.kubernetes.io/aws-load-balancer-type"                     = "nlb"
+        "service.beta.kubernetes.io/aws-load-balancer-subnets"                  = join(",", module.vpc.public_subnets)
+        "service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags" = join(",", [for k, v in local.tags_traefik_lb : "${k}=${v}"])
       }
     }
   })]

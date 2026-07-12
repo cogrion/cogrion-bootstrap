@@ -10,9 +10,10 @@ resource "aws_iam_policy" "cluster_agent_policy" {
   name        = "${local.cogrion_workspace_prefix}-cluster-agent-policy"
   description = "Cogrion cplane-agent policy"
   policy = templatefile("${path.module}/cluster_agent_policy.json", {
-    aws_account_id       = data.aws_caller_identity.current.account_id
-    cogrion_account_id   = var.cogrion_account_id
-    cogrion_workspace_id = local.cogrion_workspace_prefix
+    aws_account_id           = data.aws_caller_identity.current.account_id
+    cogrion_account_id       = var.cogrion_account_id
+    cogrion_workspace_id     = var.cogrion_workspace_id
+    cogrion_workspace_prefix = local.cogrion_workspace_prefix
   })
   tags = local.tags
 }
