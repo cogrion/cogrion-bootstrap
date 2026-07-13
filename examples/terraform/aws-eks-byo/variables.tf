@@ -340,3 +340,10 @@ variable "terraform_backend_bucket" {
   type        = string
   default     = ""
 }
+
+# --- OpenBao BYO infra (openbao.tf) ---------------------------
+variable "create_required_byo_infra" {
+  description = "Provision the namespace/StorageClass/S3 bucket/IRSA role/PV-reattach RBAC that openbao's KCL module would otherwise create itself. Set openbao.byoInfra: true in the workspace's KCL values once this is applied."
+  type        = bool
+  default     = false
+}

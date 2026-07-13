@@ -1,0 +1,48 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OpenBaoKMSManage",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:CreateKey",
+        "kms:CreateAlias",
+        "kms:ListAliases",
+        "kms:TagResource",
+        "kms:EnableKeyRotation"
+      ],
+      "Resource": ["*"]
+    },
+    {
+      "Sid": "OpenBaoSnapshotS3Bucket",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["*"]
+    },
+    {
+      "Sid": "OpenBaoInitSecretsManager",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": ["*"]
+    },
+    {
+      "Sid": "OpenBaoSnapshotS3Objects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": ["*"]
+    }
+  ]
+}

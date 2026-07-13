@@ -3,6 +3,8 @@ region = "us-east-1"
 cogrion_account_id   = "my-account"
 cogrion_workspace_id = "w-my-workspace"
 
+create_required_byo_infra = false
+
 # --- Tagging: organizational / operational / compliance / finops ---------
 # All of these have industry-standard defaults (see variables.tf) — shown
 # here for discoverability. Override to match your own org's conventions;
