@@ -1,5 +1,6 @@
 import base64
 import json
+import ssl
 import subprocess
 import tempfile
 import os
@@ -11,30 +12,50 @@ from typing import Optional
 SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 
-def _discover_oidc_issuer() -> Optional[str]:
-    """Read this pod's own projected ServiceAccount token and return its
-    `iss` claim — the cluster's own OIDC issuer URL. Mirrors
-    control-plane/agent's discoverOidcIssuer() (src/lifecycle/oidcIssuer.ts);
-    without this, createClusterAuthMount never runs and ESO can never
-    authenticate to OpenBao for the wildcard TLS cert."""
+def _discover_oidc_issuer(
+    cluster_name: Optional[str] = None, region: Optional[str] = None
+) -> Optional[str]:
+    """Return the cluster's OIDC issuer URL.
+
+    Primary: decode the `iss` claim from this pod's projected SA token (in-cluster path).
+    Fallback: call `aws eks describe-cluster` when the SA token is absent (local dev path)."""
     try:
         with open(SA_TOKEN_PATH) as f:
             token = f.read().strip()
+
+        parts = token.split(".")
+        if len(parts) == 3:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            try:
+                payload = json.loads(base64.urlsafe_b64decode(padded))
+                iss = payload.get("iss")
+                if isinstance(iss, str):
+                    return iss
+            except (ValueError, json.JSONDecodeError):
+                pass
     except OSError:
+        pass
+
+    if not cluster_name or not region:
         return None
 
-    parts = token.split(".")
-    if len(parts) != 3:
+    cmd = [
+        "aws",
+        "eks",
+        "describe-cluster",
+        "--name",
+        cluster_name,
+        "--region",
+        region,
+        "--query",
+        "cluster.identity.oidc.issuer",
+        "--output",
+        "text",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
         return None
-
-    padded = parts[1] + "=" * (-len(parts[1]) % 4)
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(padded))
-    except (ValueError, json.JSONDecodeError):
-        return None
-
-    iss = payload.get("iss")
-    return iss if isinstance(iss, str) else None
+    return result.stdout.strip()
 
 
 @dataclass
@@ -57,13 +78,17 @@ class RegistrationResult:
     github_private_key: str = ""
 
 
-def _post_json(url: str, payload: dict) -> dict:
+def _post_json(url: str, payload: dict, skip_tls_verify: bool = False) -> dict:
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
+    ctx = ssl.create_default_context()
+    if skip_tls_verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
@@ -71,7 +96,13 @@ def _post_json(url: str, payload: dict) -> dict:
 
 
 def register_agent(
-    control_plane_url: str, token: str, namespace: str, dry_run: bool
+    control_plane_url: str,
+    token: str,
+    namespace: str,
+    dry_run: bool,
+    skip_tls_verify: bool = False,
+    cluster_name: Optional[str] = None,
+    region: Optional[str] = None,
 ) -> RegistrationResult:
     secret_name = "cluster-agent-credentials"
 
@@ -90,7 +121,7 @@ def register_agent(
         print(f"[register] dry-run: would POST {control_plane_url}/api/v1/agent/register")
         return RegistrationResult(skipped=True)
 
-    oidc_issuer_url = _discover_oidc_issuer()
+    oidc_issuer_url = _discover_oidc_issuer(cluster_name=cluster_name, region=region)
     if not oidc_issuer_url:
         raise RuntimeError(
             "Could not discover this cluster's OIDC issuer from the bootstrap "

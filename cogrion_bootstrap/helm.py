@@ -105,7 +105,8 @@ def helm_apply(
 
     for key, value in (set_args or {}).items():
         if value:
-            cmd += ["--set", f"{key}={value}"]
+            escaped = str(value).replace(",", "\\,")
+            cmd += ["--set", f"{key}={escaped}"]
 
     tmp_values = None
     if values_yaml:
