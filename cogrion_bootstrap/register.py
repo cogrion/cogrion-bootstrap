@@ -1,5 +1,6 @@
 import base64
 import json
+import ssl
 import subprocess
 import tempfile
 import os
@@ -57,13 +58,17 @@ class RegistrationResult:
     github_private_key: str = ""
 
 
-def _post_json(url: str, payload: dict) -> dict:
+def _post_json(url: str, payload: dict, skip_tls_verify: bool = False) -> dict:
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
+    ctx = ssl.create_default_context()
+    if skip_tls_verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
@@ -71,7 +76,7 @@ def _post_json(url: str, payload: dict) -> dict:
 
 
 def register_agent(
-    control_plane_url: str, token: str, namespace: str, dry_run: bool
+    control_plane_url: str, token: str, namespace: str, dry_run: bool, skip_tls_verify: bool = False
 ) -> RegistrationResult:
     secret_name = "cluster-agent-credentials"
 

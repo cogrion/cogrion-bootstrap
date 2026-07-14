@@ -257,6 +257,11 @@ def main():
         "--dry-run", action="store_true", help="Print actions without executing anything"
     )
     parser.add_argument(
+        "--skip-tls-verify",
+        action="store_true",
+        help="Disable TLS certificate verification when calling the control plane (use when the server has a self-signed cert)",
+    )
+    parser.add_argument(
         "--auto-approve",
         action="store_true",
         help="Skip the interactive 'yes' confirmation prompt (for unattended/CI runs, "
@@ -389,6 +394,7 @@ def main():
             token=args.token,
             namespace=args.namespace,
             dry_run=dry,
+            skip_tls_verify=args.skip_tls_verify,
         )
         if not args.no_external_dns:
             _copy_secret_to_namespace(
@@ -468,6 +474,7 @@ def main():
             token=args.token,
             namespace=args.namespace,
             dry_run=dry,
+            skip_tls_verify=args.skip_tls_verify,
         )
 
         provider = AWSProvider(
