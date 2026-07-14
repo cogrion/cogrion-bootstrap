@@ -171,6 +171,7 @@ class AWSProvider(BaseProvider):
                         _arn("external-secrets"),
                     )
                 ),
+                "webhook.replicaCount": "2",
             },
         )
 

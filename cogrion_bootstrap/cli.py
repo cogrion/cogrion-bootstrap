@@ -395,6 +395,8 @@ def main():
             namespace=args.namespace,
             dry_run=dry,
             skip_tls_verify=args.skip_tls_verify,
+            cluster_name=args.cluster_name,
+            region=args.region,
         )
         if not args.no_external_dns:
             _copy_secret_to_namespace(
@@ -475,6 +477,8 @@ def main():
             namespace=args.namespace,
             dry_run=dry,
             skip_tls_verify=args.skip_tls_verify,
+            cluster_name=args.cluster_name,
+            region=args.region,
         )
 
         provider = AWSProvider(
