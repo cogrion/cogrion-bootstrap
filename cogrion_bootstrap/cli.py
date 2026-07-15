@@ -208,6 +208,15 @@ def _parse_set_args(pairs: list[str]) -> dict[str, str]:
 
 
 def main():
+    # stdout is block-buffered (not line-buffered) whenever it isn't a TTY —
+    # e.g. piped through `kubectl logs` from the bootstrap Job. Without this,
+    # every print() in this package (including the "[helm] running: ..." line
+    # right before a `--wait`-ing helm install) sits in an internal buffer
+    # and never reaches the log stream until it fills up or the process
+    # exits, making a multi-minute install look like dead silence.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(
         prog="cogrion-bootstrap",
         description="Bootstrap a tenant cluster for the Cogrion platform.",
