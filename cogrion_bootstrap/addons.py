@@ -110,7 +110,7 @@ provider:
       - name: CONTROL_PLANE_URL
         value: "{control_plane_url}"
       - name: PORT
-        value: "8080"
+        value: "8888"
       - name: MTLS_CLIENT_CERT
         valueFrom:
           secretKeyRef:
@@ -126,6 +126,16 @@ provider:
           secretKeyRef:
             name: {secret}
             key: CPLANE_AGENT_MTLS_CA_CERT
+    service:
+      port: 8888
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8888
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8888
 policy: sync
 sources:
   - service
