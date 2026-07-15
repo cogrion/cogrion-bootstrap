@@ -110,7 +110,7 @@ provider:
       - name: CONTROL_PLANE_URL
         value: "{control_plane_url}"
       - name: PORT
-        value: "8888"
+        value: "8080"
       - name: MTLS_CLIENT_CERT
         valueFrom:
           secretKeyRef:
