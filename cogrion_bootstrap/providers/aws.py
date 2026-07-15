@@ -108,6 +108,7 @@ class AWSProvider(BaseProvider):
             set_args={
                 "autoDiscovery.clusterName": self.cluster_name,
                 "awsRegion": self.region,
+                "serviceAccount.name": "cluster-autoscaler",
                 **(
                     _irsa_set(
                         "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn",
