@@ -91,7 +91,7 @@ def make_traefik(public_subnets: str) -> HelmAddon:
 
 
 DNS_WEBHOOK_IMAGE = "public.ecr.aws/quantdata/cogrion/dns-webhook"
-DNS_WEBHOOK_VERSION = "0.1.1"
+DNS_WEBHOOK_VERSION = "0.1.6"
 
 
 # external-dns with the dns-webhook sidecar. The sidecar proxies the
