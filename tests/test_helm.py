@@ -6,6 +6,7 @@ from cogrion_bootstrap.helm import (
     ensure_helm_repos,
     is_externally_managed,
     _helm_status,
+    _helm_description,
 )
 
 
@@ -86,7 +87,11 @@ def test_helm_apply_deletes_stuck_release(mocker):
     assert "cplane-agent" in delete_call.args[0]
 
 
-def test_helm_apply_rolls_back_failed_release(mocker):
+def test_helm_apply_deletes_failed_release(mocker):
+    # A "failed" release has no successfully-deployed revision to roll back
+    # to (the failure IS the only/latest revision) — `helm rollback` with no
+    # target errors out ("release has no 0 version"), so recovery must be
+    # delete-and-reinstall, same as the pending-* states.
     mocker.patch("cogrion_bootstrap.helm._helm_status", return_value="failed")
     run = mocker.patch(
         "cogrion_bootstrap.helm.subprocess.run", return_value=mocker.MagicMock(returncode=0)
@@ -99,8 +104,54 @@ def test_helm_apply_rolls_back_failed_release(mocker):
         dry_run=False,
     )
 
-    rollback_call = next(c for c in run.call_args_list if "rollback" in c.args[0])
-    assert "cplane-agent" in rollback_call.args[0]
+    delete_call = next(c for c in run.call_args_list if "delete" in c.args[0])
+    assert "cplane-agent" in delete_call.args[0]
+    rollback_calls = [c for c in run.call_args_list if "rollback" in c.args[0]]
+    assert rollback_calls == []
+
+
+def test_helm_apply_prints_failure_reason_before_deleting(mocker, capsys):
+    # The recovery log line previously said only "stuck in 'failed'" with no
+    # indication of *why* — hiding real causes like a client rate-limiter
+    # timeout behind a generic message on every retry.
+    mocker.patch("cogrion_bootstrap.helm._helm_status", return_value="failed")
+    mocker.patch(
+        "cogrion_bootstrap.helm._helm_description",
+        return_value='Release "cplane-agent" failed: client rate limiter Wait '
+        "returned an error: context deadline exceeded",
+    )
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run", return_value=mocker.MagicMock(returncode=0)
+    )
+
+    helm_apply(
+        release="cplane-agent",
+        namespace="cogrion-system",
+        chart="oci://example/chart",
+        dry_run=False,
+    )
+
+    out = capsys.readouterr().out
+    assert "context deadline exceeded" in out
+
+
+def test_helm_description_returns_description(mocker):
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        return_value=MagicMock(
+            returncode=0,
+            stdout=json.dumps({"info": {"status": "failed", "description": "boom"}}),
+        ),
+    )
+    assert _helm_description("my-release", "default") == "boom"
+
+
+def test_helm_description_returns_empty_on_missing_release(mocker):
+    mocker.patch(
+        "cogrion_bootstrap.helm.subprocess.run",
+        return_value=MagicMock(returncode=1, stdout=""),
+    )
+    assert _helm_description("my-release", "default") == ""
 
 
 def test_helm_apply_skips_non_helm_owned_release(mocker):
