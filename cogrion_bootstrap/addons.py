@@ -141,7 +141,7 @@ provider:
 # the main container on a slow-but-not-failed response.
 extraArgs:
   webhook-provider-read-timeout: 30s
-  interval: 5m
+interval: 5m
 policy: sync
 sources:
   - service
