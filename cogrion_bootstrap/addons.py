@@ -136,6 +136,12 @@ provider:
       httpGet:
         path: /healthz
         port: 8888
+# Default webhook-provider-read-timeout (5s) is too tight for the dns-webhook
+# sidecar's occasional cold-start call to the control plane, which crashloops
+# the main container on a slow-but-not-failed response.
+extraArgs:
+  webhook-provider-read-timeout: 30s
+  interval: 5m
 policy: sync
 sources:
   - service
